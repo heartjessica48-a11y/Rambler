@@ -131,11 +131,15 @@ public static class LiveServer
         return "other";
     }
 
-    /// <summary>A well-behaved server: completes setup, sends interims, and finals on activityEnd.</summary>
+    /// <summary>
+    /// A well-behaved server: completes setup, sends interims, and finals on activityEnd.
+    /// Like the real service, pure silence (all-zero audio) produces no transcript.
+    /// </summary>
     public static FakeWebSocket Transcribing(params string[] finals)
     {
         var ws = new FakeWebSocket();
         var audioMessages = 0;
+        var heardSound = false;
         ws.OnClientMessage = (socket, msg) =>
         {
             switch (MessageType(msg))
@@ -145,10 +149,15 @@ public static class LiveServer
                     break;
                 case "audio":
                     audioMessages++;
-                    socket.ServerSend(Interim($"partial {audioMessages}"));
+                    using (var doc = JsonDocument.Parse(msg))
+                    {
+                        var data = Convert.FromBase64String(doc.RootElement.GetProperty("realtimeInput").GetProperty("audio").GetProperty("data").GetString()!);
+                        if (data.Any(b => b != 0)) heardSound = true;
+                    }
+                    if (heardSound) socket.ServerSend(Interim($"partial {audioMessages}"));
                     break;
                 case "activityEnd":
-                    foreach (var f in finals) socket.ServerSend(Final(f));
+                    if (heardSound) foreach (var f in finals) socket.ServerSend(Final(f));
                     socket.ServerSend(TurnComplete);
                     break;
             }

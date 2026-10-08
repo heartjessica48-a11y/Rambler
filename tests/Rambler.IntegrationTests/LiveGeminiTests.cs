@@ -41,10 +41,24 @@ public class LiveGeminiTests(ITestOutputHelper output)
         var service = new GeminiCleanupService(Gemini);
         var options = DictationCoordinator.BuildCleanupOptions(new AppSettings());
         const string transcript = "um so like what's the uh the fastest way to, no wait, the safest way to rotate API keys in a fucking monorepo";
-        var cleaned = await service.CleanAsync(transcript, options, Key, CancellationToken.None);
+        var cleaned = await service.CleanAsync(new CleanupRequest(transcript), options, Key, CancellationToken.None);
         output.WriteLine(cleaned);
         Assert.False(string.IsNullOrWhiteSpace(cleaned));
         Assert.Contains("safest", cleaned, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [LiveFact]
+    public async Task Progressive_chunk_cleanup_returns_only_the_new_chunk()
+    {
+        var service = new GeminiCleanupService(Gemini);
+        var options = DictationCoordinator.BuildCleanupOptions(new AppSettings());
+        const string committed = "I'm refactoring the parser so it handles comments.";
+        const string chunk = "and uh new paragraph the second thing is the the tokenizer needs unit tests";
+        var cleaned = await service.CleanAsync(new CleanupRequest(chunk, committed, Progressive: true, IsFinal: true),
+            options, Key, CancellationToken.None);
+        output.WriteLine(cleaned.Replace("\n", "\\n"));
+        Assert.DoesNotContain("refactoring the parser", cleaned, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("tokenizer", cleaned, StringComparison.OrdinalIgnoreCase);
     }
 
     [LiveFact(needsWav: true)]

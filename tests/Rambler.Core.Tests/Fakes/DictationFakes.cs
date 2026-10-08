@@ -41,6 +41,7 @@ public sealed class FakeAudioSource : IAudioSource
 public sealed class FakeTranscriptionSession : ITranscriptionSession
 {
     public event Action<string>? PreviewChanged;
+    public event Action<CommittedSegment>? Committed;
     public event Action<string>? Notice;
     public event Action<GeminiException>? Fatal;
 
@@ -54,15 +55,25 @@ public sealed class FakeTranscriptionSession : ITranscriptionSession
     public void Start() => Started = true;
     public void WriteAudio(ReadOnlySpan<byte> pcm) => Interlocked.Add(ref AudioBytes, pcm.Length);
 
+    /// <summary>Like the real session: remaining text is emitted as a committed segment before completion.</summary>
+    public bool EmitResultOnComplete { get; set; } = true;
+    private int _nextIndex;
+
     public async Task<TranscriptionResult> CompleteAsync(CancellationToken ct)
     {
         if (CompletionGate is not null) await CompletionGate.Task.WaitAsync(ct);
         ct.ThrowIfCancellationRequested();
         if (CompleteException is not null) throw CompleteException;
+        if (EmitResultOnComplete && !string.IsNullOrWhiteSpace(Result.Text)) RaiseCommitted(_nextIndex, Result.Text);
         return Result;
     }
 
     public void RaisePreview(string text) => PreviewChanged?.Invoke(text);
+    public void RaiseCommitted(int index, string text, double seconds = 3)
+    {
+        _nextIndex = index + 1;
+        Committed?.Invoke(new CommittedSegment(index, text, TimeSpan.FromSeconds(seconds)));
+    }
     public void RaiseNotice(string text) => Notice?.Invoke(text);
     public void RaiseFatal(GeminiException ex) => Fatal?.Invoke(ex);
 
@@ -92,37 +103,91 @@ public sealed class FakeSessionFactory : ITranscriptionSessionFactory
 
 public sealed class FakeCleanup : ICleanupService
 {
+    private readonly object _gate = new();
     public List<string> Inputs { get; } = [];
+    public List<CleanupRequest> Requests { get; } = [];
     public Func<string, string> Transform { get; set; } = t => "CLEAN: " + t;
+    public Func<CleanupRequest, TimeSpan>? Delay { get; set; }
     public Exception? Throw { get; set; }
+    public Func<CleanupRequest, Exception?>? ThrowFor { get; set; }
 
-    public Task<string> CleanAsync(string transcript, CleanupOptions options, string apiKey, CancellationToken ct)
+    public async Task<string> CleanAsync(CleanupRequest request, CleanupOptions options, string apiKey, CancellationToken ct)
     {
-        Inputs.Add(transcript);
-        if (Throw is not null) throw Throw;
-        return Task.FromResult(Transform(transcript));
+        lock (_gate)
+        {
+            Inputs.Add(request.Transcript);
+            Requests.Add(request);
+        }
+        if (Delay?.Invoke(request) is { } d && d > TimeSpan.Zero) await Task.Delay(d, ct);
+        if ((ThrowFor?.Invoke(request) ?? Throw) is { } ex) throw ex;
+        return Transform(request.Transcript);
     }
 }
 
 public sealed class FakeInserter : ITextInserter
 {
+    private readonly object _gate = new();
     public List<(InsertionTarget Target, string Text)> Inserted { get; } = [];
+    public List<InsertOptions> Options { get; } = [];
     public List<string> Copied { get; } = [];
-    public InsertionTarget Target { get; set; } = new(42, 7, "notepad");
+    public InsertionTarget Target { get; set; } = new(42, 7, "notepad") { AppName = "Notepad", Kind = TargetKind.Editable };
     public Func<string, InsertionResult> Result { get; set; } = _ => InsertionResult.Success;
 
-    public InsertionTarget CaptureTarget() => Target;
+    /// <summary>Whether the captured target currently has focus.</summary>
+    public volatile bool Ready = true;
+    /// <summary>Whether an allowed refocus attempt succeeds.</summary>
+    public bool RefocusSucceeds { get; set; } = true;
+    public bool OwnWindowActive { get; set; }
+    public int ActiveInsertions;
+    public int MaxConcurrentInsertions;
 
-    public Task<InsertionResult> InsertAsync(InsertionTarget target, string text, CancellationToken ct)
+    public event Action? FocusChanged;
+
+    public string AllInsertedText { get { lock (_gate) return string.Concat(Inserted.Select(i => i.Text)); } }
+
+    public InsertionTarget CaptureTarget() => Target;
+    public bool IsTargetReady(InsertionTarget target) => Ready;
+    public bool IsOwnWindowActive => OwnWindowActive;
+
+    public void SetFocus(bool ready)
     {
-        var result = Result(text);
-        if (result.Outcome == InsertionOutcome.Inserted) Inserted.Add((target, text));
-        return Task.FromResult(result);
+        Ready = ready;
+        FocusChanged?.Invoke();
+    }
+
+    public async Task<InsertionResult> InsertAsync(InsertionTarget target, string text, InsertOptions options, CancellationToken ct)
+    {
+        var active = Interlocked.Increment(ref ActiveInsertions);
+        lock (_gate) MaxConcurrentInsertions = Math.Max(MaxConcurrentInsertions, active);
+        try
+        {
+            await Task.Yield();
+            lock (_gate) Options.Add(options);
+            if (!Ready && options.AllowRefocus && RefocusSucceeds) Ready = true;
+            if (!Ready)
+            {
+                if (options.CopyOnFailure)
+                {
+                    lock (_gate) Copied.Add(text);
+                    return new InsertionResult(InsertionOutcome.CopiedToClipboard, "Focus moved. Text copied.");
+                }
+                return new InsertionResult(InsertionOutcome.TargetNotReady, "Not focused.");
+            }
+            var result = Result(text);
+            if (result.Outcome == InsertionOutcome.Inserted) lock (_gate) Inserted.Add((target, text));
+            if (result.Outcome == InsertionOutcome.TargetNotReady && result.CharsInserted > 0)
+                lock (_gate) Inserted.Add((target, text[..result.CharsInserted]));
+            return result;
+        }
+        finally
+        {
+            Interlocked.Decrement(ref ActiveInsertions);
+        }
     }
 
     public bool CopyToClipboard(string text)
     {
-        Copied.Add(text);
+        lock (_gate) Copied.Add(text);
         return true;
     }
 }

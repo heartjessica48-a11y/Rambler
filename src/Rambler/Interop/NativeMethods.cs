@@ -66,6 +66,27 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern nint GetAncestor(nint hWnd, uint flags);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetClassName(nint hWnd, StringBuilder className, int maxCount);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct GUITHREADINFO
+    {
+        public int cbSize;
+        public uint flags;
+        public nint hwndActive;
+        public nint hwndFocus;
+        public nint hwndCapture;
+        public nint hwndMenuOwner;
+        public nint hwndMoveSize;
+        public nint hwndCaret;
+        public RECT rcCaret;
+    }
+
+    /// <summary>Per-thread focus/caret info; works for other processes without hooks or injection.</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO info);
+
     public const uint GA_ROOT = 2;
 
     public delegate void WinEventProc(nint hWinEventHook, uint eventType, nint hwnd, int idObject, int idChild,

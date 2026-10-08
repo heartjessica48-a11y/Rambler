@@ -36,6 +36,7 @@ public partial class App : Application
     private HotkeyService? _hotkeys;
     private IReadOnlyList<HotkeyRegistration> _hotkeyResults = [];
     private WasapiAudioSource? _audio;
+    private TargetWindowService? _targets;
     private TextInsertionService? _inserter;
     private DictationCoordinator? _coordinator;
     private PopupViewModel _popupViewModel = null!;
@@ -82,7 +83,8 @@ public partial class App : Application
         _http = GeminiHttp.CreateDefaultClient();
         _gemini = new GeminiHttp(_http);
         _audio = new WasapiAudioSource();
-        _inserter = new TextInsertionService(() => _settings.Current, HidePopupAsync);
+        _targets = new TargetWindowService();
+        _inserter = new TextInsertionService(() => _settings.Current, HidePopupAsync, _targets);
         var sessions = new LiveTranscriptionSessionFactory(new ClientWebSocketFactory(), new GeminiRecordedTranscriber(_gemini));
         _coordinator = new DictationCoordinator(_audio, sessions, new GeminiCleanupService(_gemini), _inserter,
             () => _settings.Current, () => _credentials.GetApiKey());
@@ -142,6 +144,8 @@ public partial class App : Application
         var tooltip = state switch
         {
             DictationState.Idle => "Ready",
+            DictationState.Listening when _coordinator.OutputState == OutputStatus.WaitingForTarget =>
+                $"Listening (waiting for {_coordinator.Target.DisplayName})",
             DictationState.Listening => "Listening (microphone on)",
             DictationState.Finalizing => "Finalizing transcript",
             DictationState.Cleaning => "Cleaning up",
@@ -255,7 +259,7 @@ public partial class App : Application
         _popup?.ForceClose();
         _hotkeys?.Dispose();
         _tray?.Dispose();
-        _inserter?.Dispose();
+        _targets?.Dispose();
         _audio?.Dispose();
         _sounds?.Dispose();
         _theme?.Dispose();

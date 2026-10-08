@@ -1,7 +1,5 @@
 using System.Diagnostics;
-using System.IO;
 using System.Runtime.InteropServices;
-using System.Text;
 using Rambler.Core;
 using Rambler.Core.Dictation;
 using Rambler.Core.Settings;
@@ -10,108 +8,127 @@ using static Rambler.Interop.NativeMethods;
 namespace Rambler.Services;
 
 /// <summary>
-/// Inserts text into the window that was focused when dictation started.
-/// Safety rules: never type unless that exact window is verified to be in the foreground again;
-/// otherwise put the text on the clipboard and tell the user. Uses only SendInput (Unicode) and the
-/// clipboard; no hooks, no injection, no elevation.
+/// Inserts text into the control captured when dictation started.
+/// <list type="bullet">
+/// <item>Never types unless that window is in the foreground with the same control focused
+/// (<see cref="TargetWindowService.IsReady"/>); focus is re-checked between typing batches.</item>
+/// <item>Background (progressive) insertion never steals focus and never touches the clipboard on failure:
+/// it reports <see cref="InsertionOutcome.TargetNotReady"/> and the caller keeps the text.</item>
+/// <item>Line breaks never use a bare Enter, which sends messages in chat apps, except in classic editors
+/// where Enter is a line break. Elsewhere multi-line text is pasted, which inserts line breaks without submitting.</item>
+/// </list>
+/// Only SendInput (Unicode) and the clipboard are used: no hooks, no injection, no elevation.
 /// </summary>
-public sealed class TextInsertionService : ITextInserter, IDisposable
+public sealed class TextInsertionService : ITextInserter
 {
-    private const int TypeMaxLength = 300;
-    private const int InputsPerBatch = 100;
+    private const int CharsPerBatch = 48;
+
+    private enum NewlineKey { Enter, ShiftEnter }
 
     private readonly Func<AppSettings> _settings;
     private readonly Func<Task> _hideOwnWindows;
-    private readonly int _ownProcessId = Environment.ProcessId;
-    private readonly WinEventProc _foregroundProc;
-    private readonly nint _hook;
-    private nint _lastExternalWindow;
+    private readonly TargetWindowService _targets;
 
-    /// <param name="hideOwnWindows">Hides Rambler's popup (on the UI thread) before focus is handed back.</param>
-    public TextInsertionService(Func<AppSettings> settings, Func<Task> hideOwnWindows)
+    /// <param name="hideOwnWindows">Hides Rambler's popup (on the UI thread) after focus is handed back.</param>
+    public TextInsertionService(Func<AppSettings> settings, Func<Task> hideOwnWindows, TargetWindowService targets)
     {
         _settings = settings;
         _hideOwnWindows = hideOwnWindows;
-        _foregroundProc = OnForegroundChanged; // keep the delegate alive
-        _lastExternalWindow = GetForegroundWindow();
-        _hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, 0, _foregroundProc, 0, 0,
-            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        _targets = targets;
     }
 
-    public InsertionTarget CaptureTarget()
+    public event Action? FocusChanged
     {
-        var hwnd = GetForegroundWindow();
-        if (hwnd == 0 || IsOwnWindow(hwnd)) hwnd = _lastExternalWindow;
-        if (hwnd == 0 || !IsWindow(hwnd)) return InsertionTarget.None;
-
-        hwnd = GetAncestor(hwnd, GA_ROOT) is var root && root != 0 ? root : hwnd;
-        GetWindowThreadProcessId(hwnd, out var pid);
-        return new InsertionTarget(hwnd, (int)pid, Describe(hwnd, pid));
+        add => _targets.ForegroundChanged += value;
+        remove => _targets.ForegroundChanged -= value;
     }
 
-    public async Task<InsertionResult> InsertAsync(InsertionTarget target, string text, CancellationToken ct)
+    public bool IsOwnWindowActive => _targets.IsOwnWindowActive;
+
+    public InsertionTarget CaptureTarget() => _targets.Capture();
+
+    public bool IsTargetReady(InsertionTarget target) => _targets.IsReady(target);
+
+    public async Task<InsertionResult> InsertAsync(InsertionTarget target, string text, InsertOptions options, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(text)) return InsertionResult.Success;
 
         if (target.IsNone || !IsWindow(target.WindowHandle) || WindowPid(target.WindowHandle) != target.ProcessId)
-            return CopyInstead(text, "The window you were dictating into is gone.");
+            return Unavailable(text, options, "The window you were dictating into is gone.", final: true);
+
+        if (target.Kind == TargetKind.NotEditable)
+            return Unavailable(text, options, $"{target.DisplayName} doesn't have a text field focused.", final: true);
 
         if (!Environment.IsPrivilegedProcess && IsElevatedOrProtected((uint)target.ProcessId))
-            return CopyInstead(text, $"{target.Description} runs as administrator, so Windows blocks typing into it.");
+            return Unavailable(text, options, $"{target.DisplayName} runs as administrator, so Windows blocks typing into it.", final: true);
 
-        await _hideOwnWindows().ConfigureAwait(false);
+        if (!_targets.IsReady(target))
+        {
+            if (!options.AllowRefocus || !await RefocusAsync(target, ct).ConfigureAwait(false))
+                return Unavailable(text, options, $"{target.DisplayName} isn't focused.", final: false);
+        }
+        else if (options.AllowRefocus)
+        {
+            await _hideOwnWindows().ConfigureAwait(false);
+        }
 
         if (!await WaitForModifiersReleasedAsync(ct).ConfigureAwait(false))
-            return CopyInstead(text, "Keys were still held down, so nothing was typed.");
-
-        if (!await FocusAsync(target.WindowHandle, ct).ConfigureAwait(false))
-            return CopyInstead(text, $"Couldn't switch back to {target.Description}.");
+            return Unavailable(text, options, "Keys were still held down, so nothing was typed.", final: false);
 
         var settings = _settings();
-        var paste = settings.InsertionMethod switch
-        {
-            InsertionMethod.Paste => true,
-            InsertionMethod.Type => false,
-            _ => text.Contains('\n') || text.Length > TypeMaxLength,
-        };
-
-        return paste
-            ? await PasteAsync(target, text, settings.RestoreClipboard, ct).ConfigureAwait(false)
-            : await TypeAsync(target, text, ct).ConfigureAwait(false);
+        if (settings.InsertionMethod == InsertionMethod.Paste)
+            return await PasteAsync(target, text, settings.RestoreClipboard, ct).ConfigureAwait(false);
+        if (!text.Contains('\n'))
+            return await TypeAsync(target, text, NewlineKey.Enter, ct).ConfigureAwait(false);
+        if (settings.InsertionMethod == InsertionMethod.Type)
+            return await TypeAsync(target, text, NewlineKey.ShiftEnter, ct).ConfigureAwait(false);
+        return _targets.IsPlainEditor(target)
+            ? await TypeAsync(target, text, NewlineKey.Enter, ct).ConfigureAwait(false)
+            : await PasteAsync(target, text, settings.RestoreClipboard, ct).ConfigureAwait(false);
     }
 
     public bool CopyToClipboard(string text) => ClipboardHelper.SetText(text, excludeFromHistory: false) != 0;
 
     // ---- Typing ---------------------------------------------------------------------------------
 
-    private async Task<InsertionResult> TypeAsync(InsertionTarget target, string text, CancellationToken ct)
+    /// <summary>Types in small batches, re-checking focus before each; reports how much was typed if interrupted.</summary>
+    private async Task<InsertionResult> TypeAsync(InsertionTarget target, string text, NewlineKey newline, CancellationToken ct)
     {
-        var inputs = BuildUnicodeInputs(text);
         var size = Marshal.SizeOf<INPUT>();
-        for (var offset = 0; offset < inputs.Length; offset += InputsPerBatch)
+        var typed = 0;
+        while (typed < text.Length)
         {
-            if (!IsForeground(target.WindowHandle))
-                return CopyInstead(text, "Focus changed while typing. The full text was copied instead.");
+            var count = Math.Min(CharsPerBatch, text.Length - typed);
+            if (typed + count < text.Length && char.IsHighSurrogate(text[typed + count - 1])) count++; // keep pairs together
 
-            var batch = inputs.AsSpan(offset, Math.Min(InputsPerBatch, inputs.Length - offset)).ToArray();
-            var sent = SendInput((uint)batch.Length, batch, size);
-            if (sent == 0)
-                return CopyInstead(text, "Windows blocked typing into this app.");
-            if (offset + InputsPerBatch < inputs.Length) await Task.Delay(5, ct).ConfigureAwait(false);
+            if (!_targets.IsReady(target, thorough: false))
+                return new InsertionResult(InsertionOutcome.TargetNotReady, "Focus moved while typing.", typed);
+
+            var inputs = BuildInputs(text.AsSpan(typed, count), newline);
+            if (inputs.Length > 0 && SendInput((uint)inputs.Length, inputs, size) == 0)
+            {
+                return typed == 0
+                    ? new InsertionResult(InsertionOutcome.Failed, "Windows blocked typing into this app.")
+                    : new InsertionResult(InsertionOutcome.TargetNotReady, "Typing was interrupted.", typed);
+            }
+            typed += count;
+            if (typed < text.Length) await Task.Delay(5, ct).ConfigureAwait(false);
         }
         return InsertionResult.Success;
     }
 
-    internal static INPUT[] BuildUnicodeInputs(string text)
+    private static INPUT[] BuildInputs(ReadOnlySpan<char> text, NewlineKey newline)
     {
-        var list = new List<INPUT>(text.Length * 2);
+        var list = new List<INPUT>(text.Length * 2 + 4);
         foreach (var c in text)
         {
             if (c == '\r') continue;
             if (c == '\n')
             {
+                if (newline == NewlineKey.ShiftEnter) list.Add(Key(VK_SHIFT_U, 0, 0));
                 list.Add(Key(VK_RETURN, 0, 0));
                 list.Add(Key(VK_RETURN, 0, KEYEVENTF_KEYUP));
+                if (newline == NewlineKey.ShiftEnter) list.Add(Key(VK_SHIFT_U, 0, KEYEVENTF_KEYUP));
                 continue;
             }
             // Surrogate pairs are sent as two UTF-16 units; Windows recombines them.
@@ -120,6 +137,8 @@ public sealed class TextInsertionService : ITextInserter, IDisposable
         }
         return [.. list];
     }
+
+    private const ushort VK_SHIFT_U = 0x10;
 
     private static INPUT Key(ushort vk, ushort scan, uint flags) => new()
     {
@@ -136,10 +155,13 @@ public sealed class TextInsertionService : ITextInserter, IDisposable
 
         var sequence = ClipboardHelper.SetText(text, excludeFromHistory: canRestore);
         if (sequence == 0)
-            return new InsertionResult(InsertionOutcome.Failed, "The clipboard is in use by another app.");
+            return new InsertionResult(InsertionOutcome.TargetNotReady, "The clipboard is in use by another app.");
 
-        if (!IsForeground(target.WindowHandle))
-            return new InsertionResult(InsertionOutcome.CopiedToClipboard, "Focus changed, so nothing was pasted. The text is on the clipboard: press Ctrl+V.");
+        if (!_targets.IsReady(target, thorough: false))
+        {
+            if (canRestore) ClipboardHelper.Restore(snapshot!);
+            return new InsertionResult(InsertionOutcome.TargetNotReady, "Focus moved before pasting.");
+        }
 
         INPUT[] chord =
         [
@@ -147,7 +169,10 @@ public sealed class TextInsertionService : ITextInserter, IDisposable
             Key(VK_V, 0, KEYEVENTF_KEYUP), Key(VK_CONTROL, 0, KEYEVENTF_KEYUP),
         ];
         if (SendInput((uint)chord.Length, chord, Marshal.SizeOf<INPUT>()) == 0)
-            return new InsertionResult(InsertionOutcome.CopiedToClipboard, "Windows blocked pasting. The text is on the clipboard: press Ctrl+V.");
+        {
+            if (canRestore) ClipboardHelper.Restore(snapshot!);
+            return new InsertionResult(InsertionOutcome.Failed, "Windows blocked pasting into this app.");
+        }
 
         if (!canRestore)
         {
@@ -164,24 +189,21 @@ public sealed class TextInsertionService : ITextInserter, IDisposable
 
     // ---- Focus & safety -----------------------------------------------------------------------
 
-    private static async Task<bool> FocusAsync(nint hwnd, CancellationToken ct)
+    /// <summary>
+    /// One attempt to hand focus back (explicit user action only). Foreground is set while Rambler's popup
+    /// still owns it (Windows only lets the foreground app do that), and the popup is hidden afterwards.
+    /// </summary>
+    private async Task<bool> RefocusAsync(InsertionTarget target, CancellationToken ct)
     {
-        if (IsForeground(hwnd)) return true;
-        if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
-        SetForegroundWindow(hwnd);
+        if (IsIconic(target.WindowHandle)) ShowWindow(target.WindowHandle, SW_RESTORE);
+        SetForegroundWindow(target.WindowHandle);
+        await _hideOwnWindows().ConfigureAwait(false);
         for (var i = 0; i < 20; i++)
         {
-            if (IsForeground(hwnd)) return true;
+            if (_targets.IsReady(target)) return true;
             await Task.Delay(25, ct).ConfigureAwait(false);
         }
-        return IsForeground(hwnd);
-    }
-
-    private static bool IsForeground(nint hwnd)
-    {
-        var fg = GetForegroundWindow();
-        if (fg == 0) return false;
-        return fg == hwnd || GetAncestor(fg, GA_ROOT) == hwnd;
+        return _targets.IsReady(target);
     }
 
     /// <summary>Waits briefly for the user to release the hotkey's modifiers so they don't combine with typed keys.</summary>
@@ -219,55 +241,25 @@ public sealed class TextInsertionService : ITextInserter, IDisposable
         }
     }
 
-    private InsertionResult CopyInstead(string text, string reason)
+    /// <summary>
+    /// The text can't go in now. Interactive inserts fall back to the clipboard; background inserts report it
+    /// (TargetNotReady: try again later; Failed: the target can never take it).
+    /// </summary>
+    private InsertionResult Unavailable(string text, InsertOptions options, string reason, bool final)
     {
-        AppLog.Warn("Insertion fallback: " + reason);
-        return CopyToClipboard(text)
-            ? new InsertionResult(InsertionOutcome.CopiedToClipboard, reason + " Text copied: press Ctrl+V to paste.")
-            : new InsertionResult(InsertionOutcome.Failed, reason);
+        if (options.CopyOnFailure)
+        {
+            AppLog.Warn("Insertion fallback: " + reason);
+            return CopyToClipboard(text)
+                ? new InsertionResult(InsertionOutcome.CopiedToClipboard, reason + " Text copied: press Ctrl+V to paste.")
+                : new InsertionResult(InsertionOutcome.Failed, reason);
+        }
+        return new InsertionResult(final ? InsertionOutcome.Failed : InsertionOutcome.TargetNotReady, reason);
     }
-
-    private bool IsOwnWindow(nint hwnd) => WindowPid(hwnd) == _ownProcessId;
 
     private static int WindowPid(nint hwnd)
     {
         GetWindowThreadProcessId(hwnd, out var pid);
         return (int)pid;
-    }
-
-    private void OnForegroundChanged(nint hook, uint evt, nint hwnd, int idObject, int idChild, uint thread, uint time)
-    {
-        if (hwnd != 0 && !IsOwnWindow(hwnd)) _lastExternalWindow = hwnd;
-    }
-
-    private static string Describe(nint hwnd, uint pid)
-    {
-        var title = new StringBuilder(256);
-        GetWindowText(hwnd, title, title.Capacity);
-        var exe = ProcessName(pid);
-        var t = title.ToString().Trim();
-        if (t.Length > 40) t = t[..40] + "…";
-        return exe is null ? (t.Length > 0 ? t : "the target window") : t.Length > 0 ? $"{exe} ({t})" : exe;
-    }
-
-    private static string? ProcessName(uint pid)
-    {
-        var process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
-        if (process == 0) return null;
-        try
-        {
-            var sb = new StringBuilder(1024);
-            var size = (uint)sb.Capacity;
-            return QueryFullProcessImageName(process, 0, sb, ref size) ? Path.GetFileNameWithoutExtension(sb.ToString()) : null;
-        }
-        finally
-        {
-            CloseHandle(process);
-        }
-    }
-
-    public void Dispose()
-    {
-        if (_hook != 0) UnhookWinEvent(_hook);
     }
 }

@@ -25,6 +25,8 @@ public sealed class DictationCoordinator : IAsyncDisposable
     private readonly DictationStateMachine _sm = new();
 
     private volatile ITranscriptionSession? _session;
+    private volatile ProgressiveOutput? _output;
+    private int _sessionId;
     private volatile DictationState _state; // lock-free mirror for audio-thread reads
     private CancellationTokenSource? _cts;
     private Timer? _maxDurationTimer;
@@ -73,6 +75,18 @@ public sealed class DictationCoordinator : IAsyncDisposable
 
     public string TargetDescription => _target.Description;
 
+    /// <summary>The control captured for this dictation (app name, editable or not).</summary>
+    public InsertionTarget Target => _target;
+
+    /// <summary>Progressive insertion status while text is being inserted as you speak; null otherwise.</summary>
+    public OutputStatus? OutputState => _output?.Status;
+
+    /// <summary>True when the last dictation finished and all its text was inserted.</summary>
+    public bool LastCompleted { get; private set; }
+
+    /// <summary>Increments for every dictation; used to ignore late events from an earlier one.</summary>
+    public int SessionId => Volatile.Read(ref _sessionId);
+
     // ---- Commands -----------------------------------------------------------------------------
 
     public Task ToggleAsync(DictationTrigger trigger)
@@ -109,12 +123,25 @@ public sealed class DictationCoordinator : IAsyncDisposable
             Preview = string.Empty;
             Message = null;
             MessageIsError = false;
+            LastCompleted = false;
             _fatal = null;
+            var sessionId = Interlocked.Increment(ref _sessionId);
             _heardVoice = false;
             _autoStopRequested = 0;
             _lastVoiceUtc = DateTime.UtcNow;
 
-            var session = _sessions.Create(BuildTranscriptionOptions(settings), _key);
+            var progressive = !settings.InsertWhenFinished;
+            var session = _sessions.Create(BuildTranscriptionOptions(settings, progressive), _key);
+            ProgressiveOutput? output = null;
+            if (progressive)
+            {
+                output = new ProgressiveOutput(ActiveMode.Value, _target, _inserter, _cleanup, BuildCleanupOptions(settings), _key);
+                output.Changed += () => { if (SessionId == sessionId) RaiseChanged(); };
+                // Committed text flows to the output only for this dictation; a later one never consumes it.
+                session.Committed += segment => { if (SessionId == sessionId) output.Add(segment); };
+            }
+            _output = output;
+
             // Ignore late events from a previous (cancelled) session.
             session.PreviewChanged += text => { if (ReferenceEquals(_session, session)) OnPreview(text); };
             session.Notice += text => { if (ReferenceEquals(_session, session)) OnNotice(text); };
@@ -128,7 +155,9 @@ public sealed class DictationCoordinator : IAsyncDisposable
             catch (Exception ex)
             {
                 _session = null;
+                _output = null;
                 _ = session.DisposeAsync().AsTask();
+                if (output is not null) _ = output.DisposeAsync().AsTask();
                 AppLog.Error("Microphone start", ex);
                 SetError(ex is AudioDeviceException ? ex.Message : "Couldn't start the microphone: " + ex.Message);
                 RaiseChanged();
@@ -157,6 +186,7 @@ public sealed class DictationCoordinator : IAsyncDisposable
         {
             if (_sm.State != DictationState.Listening || _bypass) return;
             ActiveMode = mode;
+            _output?.SetMode(mode);
         }
         RaiseChanged();
     }
@@ -165,11 +195,13 @@ public sealed class DictationCoordinator : IAsyncDisposable
     public async Task StopAsync()
     {
         ITranscriptionSession session;
+        ProgressiveOutput? output;
         CancellationToken ct;
         DictationMode mode;
         lock (_lock)
         {
             if (_sm.State != DictationState.Listening || _session is null || _cts is null) return;
+            output = _output;
             _audio.Stop(); // release the microphone immediately
             DisposeTimer();
             Transition(DictationState.Finalizing);
@@ -179,13 +211,14 @@ public sealed class DictationCoordinator : IAsyncDisposable
         }
         RaiseChanged();
 
-        await RunPipelineAsync(session, mode, ct).ConfigureAwait(false);
+        await RunPipelineAsync(session, output, mode, ct).ConfigureAwait(false);
     }
 
     /// <summary>Discards the current dictation. Nothing is inserted.</summary>
     public async Task CancelAsync()
     {
         ITranscriptionSession? toDispose = null;
+        ProgressiveOutput? outputToDispose = null;
         lock (_lock)
         {
             switch (_sm.State)
@@ -195,6 +228,9 @@ public sealed class DictationCoordinator : IAsyncDisposable
                     DisposeTimer();
                     toDispose = _session;
                     _session = null;
+                    outputToDispose = _output;
+                    _output = null;
+                    Interlocked.Increment(ref _sessionId); // anything still in flight belongs to a dead session
                     _cts?.Cancel();
                     Transition(DictationState.Idle);
                     Message = "Dictation cancelled.";
@@ -208,10 +244,14 @@ public sealed class DictationCoordinator : IAsyncDisposable
             }
         }
         RaiseChanged();
+        if (outputToDispose is not null) await outputToDispose.DisposeAsync().ConfigureAwait(false);
         if (toDispose is not null) await toDispose.DisposeAsync().ConfigureAwait(false);
     }
 
-    /// <summary>Inserts <see cref="PendingText"/> into the original target (user accepted the offer).</summary>
+    /// <summary>
+    /// Inserts <see cref="PendingText"/> (the user accepted the offer) where they were last typing: the text
+    /// field focused before the popup opened, or the original target if that one can't take text.
+    /// </summary>
     public async Task InsertPendingAsync()
     {
         string text;
@@ -222,6 +262,8 @@ public sealed class DictationCoordinator : IAsyncDisposable
             PendingText = null;
             _cts?.Dispose();
             _cts = new CancellationTokenSource();
+            var current = _inserter.CaptureTarget();
+            if (current.CanReceiveText) _target = current;
         }
         await InsertAsync(text, _cts.Token).ConfigureAwait(false);
     }
@@ -251,22 +293,24 @@ public sealed class DictationCoordinator : IAsyncDisposable
 
     // ---- Pipeline ----------------------------------------------------------------------------
 
-    private async Task RunPipelineAsync(ITranscriptionSession session, DictationMode mode, CancellationToken ct)
+    private async Task RunPipelineAsync(ITranscriptionSession session, ProgressiveOutput? output, DictationMode mode,
+        CancellationToken ct)
     {
         TranscriptionResult result;
         try
         {
+            // Emits every remaining committed utterance (into the progressive output) before returning.
             result = await session.CompleteAsync(ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            await session.DisposeAsync().ConfigureAwait(false);
+            await DisposeSessionAsync(session, output).ConfigureAwait(false);
             ReturnToIdle("Dictation cancelled.");
             return;
         }
         catch (Exception ex)
         {
-            await session.DisposeAsync().ConfigureAwait(false);
+            await DisposeSessionAsync(session, output).ConfigureAwait(false);
             AppLog.Error("Transcription", ex);
             Fail(ex is GeminiException g ? g.UserMessage : "Transcription failed: " + ex.Message);
             return;
@@ -283,6 +327,12 @@ public sealed class DictationCoordinator : IAsyncDisposable
         GeminiException? fatal;
         lock (_lock) fatal = _fatal;
 
+        if (output is not null)
+        {
+            await FinishProgressiveAsync(output, text, warning, fatal, ct).ConfigureAwait(false);
+            return;
+        }
+
         if (text.Length == 0)
         {
             Fail(fatal?.UserMessage ?? warning ?? "No speech was recognized.");
@@ -296,15 +346,15 @@ public sealed class DictationCoordinator : IAsyncDisposable
             return;
         }
 
-        var output = text;
+        var final = SpokenFormatting.Apply(text);
         if (mode == DictationMode.PromptCleanup)
         {
             if (!TryTransition(DictationState.Cleaning)) return;
             RaiseChanged();
             try
             {
-                output = await _cleanup.CleanAsync(text, BuildCleanupOptions(_snapshot), _key, ct).ConfigureAwait(false);
-                LastResult = output;
+                final = await _cleanup.CleanAsync(new CleanupRequest(text), BuildCleanupOptions(_snapshot), _key, ct).ConfigureAwait(false);
+                LastResult = final;
             }
             catch (OperationCanceledException)
             {
@@ -320,7 +370,84 @@ public sealed class DictationCoordinator : IAsyncDisposable
             }
         }
 
-        await InsertAsync(output, ct, warning).ConfigureAwait(false);
+        await InsertAsync(final, ct, warning).ConfigureAwait(false);
+    }
+
+    /// <summary>Progressive mode: flush the output, then report what was inserted and keep anything that wasn't.</summary>
+    private async Task FinishProgressiveAsync(ProgressiveOutput output, string transcript, string? warning,
+        GeminiException? fatal, CancellationToken ct)
+    {
+        if (!TryTransition(DictationState.Inserting))
+        {
+            await output.DisposeAsync().ConfigureAwait(false);
+            return;
+        }
+        RaiseChanged();
+
+        OutputResult result;
+        try
+        {
+            // Stopping from Rambler's popup took focus away from the target: allow one return of focus.
+            result = await output.CompleteAsync(allowRefocus: _inserter.IsOwnWindowActive, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            await DisposeOutputAsync(output).ConfigureAwait(false);
+            ReturnToIdle("Dictation cancelled. Text already inserted stays as is.");
+            return;
+        }
+        await DisposeOutputAsync(output).ConfigureAwait(false);
+
+        var all = result.AllText.Trim();
+        var pending = result.PendingText.Trim();
+        if (all.Length == 0)
+        {
+            if (transcript.Length == 0) Fail(fatal?.UserMessage ?? warning ?? "No speech was recognized.");
+            else Offer(transcript, "Cleanup returned no text. Insert the SMART transcript instead?");
+            return;
+        }
+
+        LastResult = all;
+        if (pending.Length > 0)
+        {
+            var why = result.Problem ?? fatal?.UserMessage ?? (_target.CanReceiveText
+                ? $"{_target.DisplayName} wasn't focused, so the rest wasn't typed."
+                : "No editable text field was focused when dictation started.");
+            Offer(pending, why + " Insert puts it where you were last typing; Copy puts it on the clipboard.");
+            return;
+        }
+
+        if (fatal is not null)
+        {
+            Fail(fatal.UserMessage + " Everything transcribed before that was inserted.");
+            return;
+        }
+
+        lock (_lock)
+        {
+            Transition(DictationState.Idle);
+            Message = warning;
+            MessageIsError = false;
+            LastCompleted = true;
+        }
+        RaiseChanged();
+        if (warning is not null) Notify?.Invoke(warning, false);
+    }
+
+    private async Task DisposeOutputAsync(ProgressiveOutput output)
+    {
+        await output.DisposeAsync().ConfigureAwait(false);
+        lock (_lock)
+        {
+            if (ReferenceEquals(_output, output)) _output = null;
+        }
+        RaiseChanged();
+    }
+
+    private async Task DisposeSessionAsync(ITranscriptionSession session, ProgressiveOutput? output)
+    {
+        if (output is not null) await DisposeOutputAsync(output).ConfigureAwait(false);
+        await session.DisposeAsync().ConfigureAwait(false);
     }
 
     private async Task InsertAsync(string output, CancellationToken ct, string? warning = null)
@@ -331,7 +458,7 @@ public sealed class DictationCoordinator : IAsyncDisposable
         InsertionResult result;
         try
         {
-            result = await _inserter.InsertAsync(_target, output, ct).ConfigureAwait(false);
+            result = await _inserter.InsertAsync(_target, output, InsertOptions.Interactive, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -348,12 +475,18 @@ public sealed class DictationCoordinator : IAsyncDisposable
                     Transition(DictationState.Idle);
                     Message = note.Length > 0 ? note : null;
                     MessageIsError = false;
+                    LastCompleted = true;
                 }
                 RaiseChanged();
                 if (note.Length > 0) Notify?.Invoke(note, false);
                 break;
             case InsertionOutcome.CopiedToClipboard:
                 Offer(output, result.Message ?? "Text copied to the clipboard. Press Ctrl+V to paste.");
+                break;
+            case InsertionOutcome.TargetNotReady:
+                // Part may already be typed; offer only the rest so nothing is inserted twice.
+                var rest = output[Math.Clamp(result.CharsInserted, 0, output.Length)..].TrimStart();
+                Offer(rest, (result.Message ?? "Focus moved.") + " The rest is kept: Insert or Copy it.");
                 break;
             default:
                 Offer(output, (result.Message ?? "Couldn't insert the text.") + " Use Copy to get it.");
@@ -422,10 +555,14 @@ public sealed class DictationCoordinator : IAsyncDisposable
 
     // ---- Helpers -----------------------------------------------------------------------------
 
-    public static TranscriptionOptions BuildTranscriptionOptions(AppSettings s) => new(
+    /// <param name="progressive">Split utterances at natural pauses so stable text is available while speaking.</param>
+    public static TranscriptionOptions BuildTranscriptionOptions(AppSettings s, bool progressive = false) => new(
         new LiveSetupOptions(s.LiveModel, Smart: true, s.LanguageCode, s.CustomVocabulary),
         new RecordedTranscriptionOptions(s.RecordedModel, Smart: true, s.LanguageCode, s.CustomVocabulary),
-        s.UseRecordedFallback);
+        s.UseRecordedFallback)
+    {
+        Endpointing = progressive ? new PauseEndpointing() : null,
+    };
 
     public static CleanupOptions BuildCleanupOptions(AppSettings s) => new(
         s.CleanupModel, s.CleanupPrompt, s.TechnicalRefinement, s.CleanupThinkingLevel, s.CustomVocabulary);
@@ -504,6 +641,7 @@ public sealed class DictationCoordinator : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         ITranscriptionSession? session;
+        ProgressiveOutput? output;
         lock (_lock)
         {
             _audio.Stop();
@@ -511,7 +649,10 @@ public sealed class DictationCoordinator : IAsyncDisposable
             _cts?.Cancel();
             session = _session;
             _session = null;
+            output = _output;
+            _output = null;
         }
+        if (output is not null) await output.DisposeAsync().ConfigureAwait(false);
         _audio.DataAvailable -= OnAudio;
         _audio.LevelChanged -= OnLevel;
         _audio.Faulted -= OnAudioFaulted;

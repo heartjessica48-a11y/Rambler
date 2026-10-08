@@ -241,6 +241,7 @@ public class DictationCoordinatorTests
     [Fact]
     public async Task Fatal_transcription_error_stops_recording_and_offers_partial_text()
     {
+        _settings.InsertWhenFinished = true; // end-of-recording mode: nothing is auto-inserted after a fatal error
         var session = new FakeTranscriptionSession { Result = new TranscriptionResult("partial words", [], false) };
         _sessions.Next = () => session;
         var c = Create();

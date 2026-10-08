@@ -1,10 +1,32 @@
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Net.WebSockets;
 using System.Threading.Channels;
 using Rambler.Core.Audio;
 using Rambler.Core.Gemini;
 
 namespace Rambler.Core.Transcription;
+
+/// <summary>
+/// Client-side utterance endpointing. When set, a natural pause ends the current utterance: its audio is
+/// finalized on its own Live connection (activityEnd) while new audio continues on a fresh one. This makes
+/// stable text available during dictation without relying on undocumented mid-turn finalization.
+/// Thresholds are deliberately conservative so brief thinking pauses don't split a sentence.
+/// </summary>
+public sealed record PauseEndpointing
+{
+    /// <summary>Silence that ends an utterance.</summary>
+    public TimeSpan Pause { get; init; } = TimeSpan.FromMilliseconds(1200);
+    /// <summary>Utterances shorter than this are never split.</summary>
+    public TimeSpan MinUtterance { get; init; } = TimeSpan.FromSeconds(2.5);
+    /// <summary>After this long, a shorter pause is enough to split.</summary>
+    public TimeSpan LongUtterance { get; init; } = TimeSpan.FromSeconds(25);
+    public TimeSpan LongUtterancePause { get; init; } = TimeSpan.FromMilliseconds(450);
+    /// <summary>Hard cap so text still appears during non-stop speech.</summary>
+    public TimeSpan MaxUtterance { get; init; } = TimeSpan.FromSeconds(60);
+    /// <summary>RMS (0..1) at or above which audio counts as speech (≈ -40 dBFS).</summary>
+    public double SpeechRms { get; init; } = 0.01;
+}
 
 public sealed record TranscriptionOptions(
     LiveSetupOptions Live,
@@ -18,14 +40,25 @@ public sealed record TranscriptionOptions(
     public TimeSpan FinalizeTimeout { get; init; } = TimeSpan.FromSeconds(10);
     public int MaxReconnectAttempts { get; init; } = 3;
     public TimeSpan ReconnectDelay { get; init; } = TimeSpan.FromSeconds(1);
+    /// <summary>Null = one utterance per connection (end-of-recording behavior).</summary>
+    public PauseEndpointing? Endpointing { get; init; }
 }
 
 public sealed record TranscriptionResult(string Text, IReadOnlyList<string> Warnings, bool UsedRecordedFallback);
+
+/// <summary>Stable, finalized text for one utterance. <see cref="Index"/> is unique and increasing per session.</summary>
+public sealed record CommittedSegment(int Index, string Text, TimeSpan Duration);
 
 public interface ITranscriptionSession : IAsyncDisposable
 {
     /// <summary>Live preview text (committed + provisional). Raised on background threads.</summary>
     event Action<string>? PreviewChanged;
+
+    /// <summary>
+    /// Finalized text for one utterance, raised exactly once per non-empty utterance and strictly in order
+    /// (a later utterance is held back until every earlier one is resolved). Raised on background threads.
+    /// </summary>
+    event Action<CommittedSegment>? Committed;
 
     /// <summary>Non-fatal status for the user, e.g. "reconnecting".</summary>
     event Action<string>? Notice;
@@ -38,7 +71,7 @@ public interface ITranscriptionSession : IAsyncDisposable
     /// <summary>Feeds 16 kHz mono PCM16. Called from the audio thread; never blocks on the network.</summary>
     void WriteAudio(ReadOnlySpan<byte> pcm);
 
-    /// <summary>Ends the audio stream and returns the finalized transcript.</summary>
+    /// <summary>Ends the audio stream, emits all remaining committed segments, and returns the full transcript.</summary>
     Task<TranscriptionResult> CompleteAsync(CancellationToken ct);
 }
 
@@ -55,15 +88,17 @@ public sealed class LiveTranscriptionSessionFactory(IWebSocketFactory sockets, I
 }
 
 /// <summary>
-/// One dictation's transcription. Audio is split into <em>segments</em>, one per Live connection
-/// (a new segment starts on rollover or after a connection failure). Each segment keeps its own
-/// transcript, and (when fallback is enabled) an in-memory copy of its audio so a failed segment can be
-/// re-transcribed with the recorded-audio model. Nothing is written to disk.
+/// One dictation's transcription. Audio is split into <em>segments</em> (utterances), one per Live
+/// connection; a new segment starts at a natural pause (when endpointing is on), on rollover, or after a
+/// connection failure. Each segment resolves to final text independently (live finals, or the
+/// recorded-audio fallback for a failed segment) and is emitted in order as a <see cref="CommittedSegment"/>.
+/// Audio kept for fallback lives in memory only and is zeroed when the session ends.
 /// </summary>
 public sealed class LiveTranscriptionSession : ITranscriptionSession
 {
     private const int SendChunkBytes = 3200; // 100 ms of 16 kHz mono PCM16
     private const int MinUsefulAudioBytes = 8000; // 250 ms
+    private const double BytesPerMs = 32.0;
 
     private readonly TranscriptionOptions _options;
     private readonly string _apiKey;
@@ -71,6 +106,7 @@ public sealed class LiveTranscriptionSession : ITranscriptionSession
     private readonly IRecordedTranscriber _recorded;
     private readonly CancellationTokenSource _abort = new();
     private readonly object _lock = new();
+    private readonly object _emitLock = new();
     private readonly List<Segment> _segments = [];
     private Segment _current;
     private Task _runner = Task.CompletedTask;
@@ -79,6 +115,13 @@ public sealed class LiveTranscriptionSession : ITranscriptionSession
     private bool _stopping;
     private bool _started;
     private int _disposed;
+    private int _emitted;
+    private int _nextToStream; // segments are streamed strictly in order (several can queue up during a reconnect)
+
+    // Endpointing state for the current utterance (guarded by _lock).
+    private double _utteranceMs;
+    private double _silenceMs;
+    private bool _heardSpeech;
 
     public LiveTranscriptionSession(TranscriptionOptions options, string apiKey, IWebSocketFactory sockets,
         IRecordedTranscriber recorded)
@@ -91,6 +134,7 @@ public sealed class LiveTranscriptionSession : ITranscriptionSession
     }
 
     public event Action<string>? PreviewChanged;
+    public event Action<CommittedSegment>? Committed;
     public event Action<string>? Notice;
     public event Action<GeminiException>? Fatal;
 
@@ -111,7 +155,42 @@ public sealed class LiveTranscriptionSession : ITranscriptionSession
         {
             if (_stopping) return;
             _current.Append(pcm);
+            if (_options.Endpointing is { } ep && ShouldEndUtterance(ep, pcm)) RolloverLocked(_current);
         }
+    }
+
+    /// <summary>Caller holds the lock. Tracks speech/silence and decides whether the utterance is complete.</summary>
+    private bool ShouldEndUtterance(PauseEndpointing ep, ReadOnlySpan<byte> pcm)
+    {
+        var ms = pcm.Length / BytesPerMs;
+        _utteranceMs += ms;
+        if (Rms(pcm) >= ep.SpeechRms)
+        {
+            _heardSpeech = true;
+            _silenceMs = 0;
+        }
+        else
+        {
+            _silenceMs += ms;
+        }
+
+        if (!_heardSpeech) return false;
+        return (_utteranceMs >= ep.MinUtterance.TotalMilliseconds && _silenceMs >= ep.Pause.TotalMilliseconds)
+               || (_utteranceMs >= ep.LongUtterance.TotalMilliseconds && _silenceMs >= ep.LongUtterancePause.TotalMilliseconds)
+               || _utteranceMs >= ep.MaxUtterance.TotalMilliseconds;
+    }
+
+    internal static double Rms(ReadOnlySpan<byte> pcm16)
+    {
+        var samples = pcm16.Length / 2;
+        if (samples == 0) return 0;
+        double sum = 0;
+        for (var i = 0; i < samples; i++)
+        {
+            double s = BinaryPrimitives.ReadInt16LittleEndian(pcm16.Slice(i * 2, 2)) / 32768.0;
+            sum += s * s;
+        }
+        return Math.Sqrt(sum / samples);
     }
 
     public async Task<TranscriptionResult> CompleteAsync(CancellationToken ct)
@@ -127,52 +206,21 @@ public sealed class LiveTranscriptionSession : ITranscriptionSession
 
         Segment[] segments;
         lock (_lock) segments = [.. _segments];
-        foreach (var s in segments) await SwallowAsync(s.Finalization).ConfigureAwait(false);
+        foreach (var s in segments)
+        {
+            if (!s.ResolutionScheduled)
+            {
+                s.Offline = true; // never streamed: transcribe its recording rather than drop it
+                ScheduleResolution(s, Task.CompletedTask);
+            }
+            await SwallowAsync(s.Resolution).ConfigureAwait(false);
+        }
+        EmitResolved();
         ct.ThrowIfCancellationRequested();
 
-        var texts = new List<string>();
-        var warnings = new List<string>();
-        var usedFallback = false;
-
-        foreach (var seg in segments)
-        {
-            string text;
-            lock (seg.Transcript) text = seg.Transcript.BestEffortText;
-
-            if (seg.NeedsFallback && seg.AudioBytes >= MinUsefulAudioBytes)
-            {
-                // After a fatal error (bad key, quota) the same key can't succeed with the fallback either.
-                if (_options.UseRecordedFallback && _fatal is null && seg.Recording is { Length: > 0 })
-                {
-                    try
-                    {
-                        var wav = WavWriter.ToWav(seg.Recording.GetBuffer().AsSpan(0, (int)seg.Recording.Length));
-                        text = await _recorded.TranscribeAsync(wav, _options.Recorded, _apiKey, ct).ConfigureAwait(false);
-                        Array.Clear(wav);
-                        usedFallback = true;
-                    }
-                    catch (GeminiException ex)
-                    {
-                        AppLog.Warn("Recorded-audio fallback failed: " + ex.Message);
-                        warnings.Add(text.Length > 0
-                            ? "Part of the recording may be incomplete (fallback failed: " + ex.UserMessage + ")"
-                            : "Part of the recording couldn't be transcribed: " + ex.UserMessage);
-                    }
-                }
-                else
-                {
-                    warnings.Add(text.Length > 0
-                        ? "Live transcription didn't finish; part of the text may be missing or provisional."
-                        : "Part of the recording couldn't be transcribed.");
-                }
-            }
-            else if (seg.TimedOut && text.Length > 0)
-            {
-                warnings.Add("The final transcript arrived late; the last words may be provisional.");
-            }
-
-            if (text.Length > 0) texts.Add(text);
-        }
+        var texts = segments.Select(s => s.ResolvedText).Where(t => t.Length > 0).ToList();
+        var warnings = segments.Select(s => s.Warning).OfType<string>().Distinct().ToList();
+        var usedFallback = segments.Any(s => s.UsedFallback);
 
         ClearRecordings();
         return new TranscriptionResult(TranscriptJoiner.Join(texts), warnings, usedFallback);
@@ -193,6 +241,7 @@ public sealed class LiveTranscriptionSession : ITranscriptionSession
         foreach (var s in segments)
         {
             await SwallowAsync(s.Finalization).ConfigureAwait(false);
+            await SwallowAsync(s.Resolution).ConfigureAwait(false);
             s.ReleaseQueuedAudio();
         }
         ClearRecordings();
@@ -218,15 +267,21 @@ public sealed class LiveTranscriptionSession : ITranscriptionSession
         handler(TranscriptJoiner.Join(parts));
     }
 
-    /// <summary>Starts a fresh connection for new audio; the old segment finalizes in the background.</summary>
+    /// <summary>Starts a fresh segment for new audio; the old one finalizes in the background.</summary>
     private void RequestRollover(Segment seg)
     {
-        lock (_lock)
-        {
-            if (_stopping || !ReferenceEquals(seg, _current)) return;
-            _current = NewSegment();
-            seg.CompleteAudio();
-        }
+        lock (_lock) RolloverLocked(seg);
+    }
+
+    /// <summary>Caller holds the lock.</summary>
+    private void RolloverLocked(Segment seg)
+    {
+        if (_stopping || !ReferenceEquals(seg, _current)) return;
+        _current = NewSegment();
+        seg.CompleteAudio();
+        _utteranceMs = 0;
+        _silenceMs = 0;
+        _heardSpeech = false;
     }
 
     private async Task RunAsync()
@@ -235,12 +290,17 @@ public sealed class LiveTranscriptionSession : ITranscriptionSession
         while (!_abort.IsCancellationRequested)
         {
             Segment seg;
-            lock (_lock) seg = _current;
+            lock (_lock)
+            {
+                if (_nextToStream >= _segments.Count) return;
+                seg = _segments[_nextToStream++];
+            }
 
             if (!_liveEnabled)
             {
                 seg.Offline = true;
                 await seg.DrainAsync(_abort.Token).ConfigureAwait(false);
+                ScheduleResolution(seg, Task.CompletedTask); // transcribed from the recording
             }
             else if (!await StreamSegmentAsync(seg).ConfigureAwait(false))
             {
@@ -276,6 +336,7 @@ public sealed class LiveTranscriptionSession : ITranscriptionSession
                     }
                 }
                 await seg.DrainAsync(_abort.Token).ConfigureAwait(false);
+                ScheduleResolution(seg, Task.CompletedTask); // fallback runs now, not at stop
 
                 if (_liveEnabled)
                 {
@@ -286,16 +347,119 @@ public sealed class LiveTranscriptionSession : ITranscriptionSession
             else
             {
                 failures = 0;
+                ScheduleResolution(seg, seg.Finalization);
             }
 
             lock (_lock)
             {
-                if (_stopping && ReferenceEquals(seg, _current)) return;
+                if (_stopping && _nextToStream >= _segments.Count) return;
             }
         }
     }
 
-    /// <summary>Streams one segment over one connection. Returns false (with seg.Error set) on failure.</summary>
+    // ---- Segment resolution and ordered emission ---------------------------------------------
+
+    private void ScheduleResolution(Segment seg, Task finalization)
+    {
+        lock (seg)
+        {
+            if (seg.ResolutionScheduled) return;
+            seg.ResolutionScheduled = true;
+            seg.Resolution = Task.Run(async () =>
+            {
+                await SwallowAsync(finalization).ConfigureAwait(false);
+                try
+                {
+                    await ResolveAsync(seg).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Error("Resolve segment", ex);
+                }
+                finally
+                {
+                    seg.IsResolved = true;
+                    EmitResolved();
+                }
+            });
+        }
+    }
+
+    /// <summary>Decides the final text for one segment: live finals, or the recorded-audio fallback.</summary>
+    private async Task ResolveAsync(Segment seg)
+    {
+        string text;
+        lock (seg.Transcript) text = seg.Transcript.BestEffortText;
+
+        if (seg.NeedsFallback && seg.AudioBytes >= MinUsefulAudioBytes)
+        {
+            // After a fatal error (bad key, quota) the same key can't succeed with the fallback either.
+            if (_options.UseRecordedFallback && _fatal is null && seg.Recording is { Length: > 0 })
+            {
+                try
+                {
+                    byte[] wav;
+                    lock (_lock) wav = WavWriter.ToWav(seg.Recording.GetBuffer().AsSpan(0, (int)seg.Recording.Length));
+                    text = (await _recorded.TranscribeAsync(wav, _options.Recorded, _apiKey, _abort.Token).ConfigureAwait(false)).Trim();
+                    Array.Clear(wav);
+                    seg.UsedFallback = true;
+                }
+                catch (GeminiException ex)
+                {
+                    AppLog.Warn("Recorded-audio fallback failed: " + ex.Message);
+                    seg.Warning = text.Length > 0
+                        ? "Part of the recording may be incomplete (fallback failed: " + ex.UserMessage + ")"
+                        : "Part of the recording couldn't be transcribed: " + ex.UserMessage;
+                }
+                catch (OperationCanceledException)
+                {
+                    // Session cancelled: keep what live transcription produced.
+                }
+            }
+            else
+            {
+                seg.Warning = text.Length > 0
+                    ? "Live transcription didn't finish; part of the text may be missing or provisional."
+                    : "Part of the recording couldn't be transcribed.";
+            }
+        }
+        else if (seg.TimedOut && text.Length > 0)
+        {
+            seg.Warning = "The final transcript arrived late; the last words may be provisional.";
+        }
+
+        seg.ResolvedText = text;
+    }
+
+    /// <summary>Emits resolved segments strictly in order; a pending earlier segment holds back later ones.</summary>
+    private void EmitResolved()
+    {
+        lock (_emitLock)
+        {
+            while (true)
+            {
+                Segment seg;
+                lock (_lock)
+                {
+                    if (_emitted >= _segments.Count) return;
+                    seg = _segments[_emitted];
+                }
+                if (!seg.IsResolved) return;
+                _emitted++;
+                if (seg.ResolvedText.Length == 0) continue;
+                try
+                {
+                    Committed?.Invoke(new CommittedSegment(seg.Index, seg.ResolvedText,
+                        TimeSpan.FromMilliseconds(seg.AudioBytes / BytesPerMs)));
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Error("Committed handler", ex);
+                }
+            }
+        }
+    }
+
     private async Task<bool> StreamSegmentAsync(Segment seg)
     {
         GeminiLiveConnection conn;
@@ -443,7 +607,7 @@ public sealed class LiveTranscriptionSession : ITranscriptionSession
     {
         Segment[] segments;
         lock (_lock) segments = [.. _segments];
-        foreach (var s in segments) s.ClearRecording();
+        foreach (var s in segments) lock (_lock) s.ClearRecording();
     }
 
     private static async Task SwallowAsync(Task task)
@@ -476,6 +640,14 @@ public sealed class LiveTranscriptionSession : ITranscriptionSession
         public volatile bool Offline;
         public GeminiException? Error { get; private set; }
         private volatile bool _failed;
+
+        // Resolution (set once, read after IsResolved).
+        public bool ResolutionScheduled { get; set; }
+        public Task Resolution { get; set; } = Task.CompletedTask;
+        public volatile bool IsResolved;
+        public string ResolvedText { get; set; } = string.Empty;
+        public string? Warning { get; set; }
+        public bool UsedFallback { get; set; }
 
         public bool NeedsFallback => _failed || Offline || (TimedOut && !Transcript.HasFinalText) ||
                                      (Error is not null && !Transcript.HasFinalText);

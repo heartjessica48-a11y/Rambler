@@ -25,25 +25,27 @@ Requirements: Windows 10 (1809+) or Windows 11, x64, a microphone, and a Gemini 
 
 ## Use
 
-- **Dictate:** put the cursor where you want text, press `Ctrl+Win+Space`, talk, press it again. Rambler transcribes, cleans up (in Prompt Cleanup mode), and inserts the text into the window you started in.
+- **Dictate:** put the cursor where you want text, press `Ctrl+Win+Space` and talk. Text appears in that app **while you speak**: each finished phrase (Smart Only) or each finished thought (Prompt Cleanup) is inserted as soon as it's stable. Press the shortcut again to stop; the last words are flushed then. Prefer one insert at the end? Settings › General › **When I finish**.
 - **Tray icon:** blue = ready, **red = microphone on**, amber = working, grey `!` = needs attention.
 - **Left-click the tray icon** for the popup, which opens right at the icon: mode switch, start/stop button, live preview, input level, and hotkey reminders. Click anywhere else to dismiss it. Dictation keeps running.
 - **Right-click the tray icon** for Settings, Restart and Exit.
 - **Cancel:** the ✕ button in the popup discards the current dictation. Nothing is inserted.
-- **Pauses are fine.** Rambler never finalizes a thought because you paused. The utterance ends only when you stop, or optionally after a long silence (Settings › Audio).
+- **Pauses are fine.** A thinking pause never ends dictation, and a pause alone never ends a thought that trails off ("…and", "so,"). Recording stops only when you stop it, or optionally after a long silence (Settings › Audio).
+- **Switching apps is safe.** If you click into another app while dictating, Rambler keeps listening but **pauses insertion** (status: *Waiting for target*). Click back into the same text field and it continues. Nothing is ever typed into a different window or field.
+- **Say "new line" or "new paragraph"** to break lines. In Prompt Cleanup, "next point" and "make that a list" also work, and the model formats lists and paragraphs on its own when the content clearly calls for it.
 - **If something fails, your words aren't lost:**
-  - If cleanup fails, the popup offers **Insert** (the SMART transcript) or **Copy**.
-  - If insertion isn't safe (the window closed, focus moved, or the app runs as administrator), the text goes to the clipboard and you're told to press `Ctrl+V`.
+  - If cleanup fails, insertion stops and the popup offers **Insert** (the SMART transcript from that point) or **Copy**.
+  - If text couldn't be inserted (you were in another app when you stopped, the window closed, or the app runs as administrator), the popup offers **Insert** (into the field you were last typing in) or **Copy**.
   - **Copy last** re-copies the most recent result. It's held in memory only.
 
 ## Settings
 
 | Tab | What you can change |
 |---|---|
-| General | Start with Windows, default mode, both shortcuts (**Record** button, optional: clear one to turn it off, with per-shortcut conflict status), insertion method (auto / type / paste), clipboard restore, theme (system / light / dark), start/stop sounds |
+| General | Start with Windows, default mode, both shortcuts (**Record** button, optional: clear one to turn it off, with per-shortcut conflict status), **when to insert** (as I speak / when I finish), insertion method (auto / type / paste), clipboard restore, theme (system / light / dark), start/stop sounds |
 | Audio | Microphone, live input level, 4-second record-and-playback test, auto-stop after silence (off by default), maximum dictation length |
 | Gemini | API key (Credential Manager), connection test, live and recorded-audio models, recorded-audio fallback, language (empty = auto-detect), custom vocabulary, last error |
-| Cleanup | Cleanup model, thinking level, **technical refinement** (default 35%), editable system prompt with **Restore default** |
+| Cleanup | Cleanup model, thinking level, **technical refinement** (default 35%), editable system prompt with **Restore default**, and a read-only view of the rules Rambler always appends |
 | Privacy | What is sent to Google and what stays local |
 
 Settings live in `%APPDATA%\Rambler\settings.json`. They contain no secrets.
@@ -59,18 +61,49 @@ Every level says never invent technical details. This is a prompt adjustment, no
 ## How it works
 
 ```
-Hotkey ─► DictationCoordinator ─► WasapiAudioSource (any mic format → 16 kHz mono PCM16)
-              │                        │
-              │                        ▼
-              │               LiveTranscriptionSession ──WSS──► gemini-3.5-transcribe-live (SMART)
-              │                        │  (fallback) ──HTTPS──► Files API + Interactions API, gemini-3.5-transcribe
-              ▼                        ▼
-   Idle → Listening → Finalizing → Cleaning (Prompt Cleanup only) → Inserting → Idle
-                                       │
-                         GeminiCleanupService ──HTTPS──► gemini-3.6-flash (generateContent)
-                                       ▼
-                         TextInsertionService (SendInput Unicode / clipboard paste)
+Microphone ─► LiveTranscriptionSession ──WSS──► gemini-3.5-transcribe-live (SMART)
+                 │  utterance ends at a natural pause → committed segment (in order, exactly once)
+                 ▼
+            ProgressiveOutput (one ordered worker per dictation)
+                 ├─ Smart Only:      SpokenFormatting ("new line"/"new paragraph") ─┐
+                 └─ Prompt Cleanup:  ThoughtBuffer → GeminiCleanupService (chunk +  │
+                                     read-only committed context) ──────────────────┤
+                                                                                     ▼
+            TextInsertionService ◄── TargetWindowService (window + focused control + UI Automation)
 ```
+
+### Progressive dictation
+
+**Finalized text.** The Live API documents interim results (`interimInputTranscription`) and finals (`inputTranscription`), but not when finals arrive mid-turn. Rambler doesn't rely on that. With manual endpointing it decides itself when an utterance is over: a pause of about 1.2 s after at least 2.5 s of speech ends the utterance. Its audio gets `activityEnd` on its own connection, the server finalizes it, and listening continues seamlessly on a fresh connection (audio during the handover is buffered, not lost).
+
+- Short thinking pauses don't split.
+- After 25 s a 0.45 s pause is enough, and 60 s is a hard cap.
+- Each finalized utterance becomes a *committed segment* with a stable, increasing index. Segments are emitted strictly in order and exactly once; a slow one, or one repaired by the recorded-audio fallback, holds later ones back.
+- Interim text is shown in the popup only and never inserted.
+
+**Chunk boundaries for Prompt Cleanup.** `ThoughtBuffer` groups committed segments using deterministic rules, with no extra model:
+
+- Release at ≥ 5 s of speech when the text ends a sentence and doesn't trail off (a trailing comma, dash, ellipsis or a connective such as "and", "but", "so", "because").
+- Release at ≥ 15 s unless it trails off; always release at 30 s or 900 characters.
+- If the speaker has been quiet for 2.5 s after a complete sentence, release it even if short; after 8 s quiet, release anything.
+- At stop, flush the rest as the final chunk.
+
+**Cleanup context.** Each chunk is sent as `<transcript final="…">` together with up to about 1,200 characters of already-produced text as `<committed_context>`. The model edits only the chunk; the committed text is read-only. Chunks are processed one at a time, in order, so a slow response can never be inserted after a later chunk.
+
+**Focus safety.** At start Rambler captures:
+
+- the foreground window (or, if the popup is in front, the window you were in before);
+- the focused control's handle (`GetGUIThreadInfo`);
+- its UI Automation identity (runtime id) and editability (control type / `ValuePattern`).
+
+Before every insert (and between typing batches) it checks that the same window is in front and the same control is focused. Browsers and Electron apps use one window for every field, which is why the UI Automation identity matters. If anything differs, insertion **waits**; it never forces another window to the front while you're dictating. The only exception is one return of focus when you stop from Rambler's own popup, done while the popup still owns the foreground, which fixes the old "couldn't switch back, copied instead" problem. Non-editable targets (the desktop, File Explorer's file list, buttons) receive nothing; the text is kept for you.
+
+**Line breaks and Enter.** Rambler never presses a bare Enter for a line break, except in classic editors such as Notepad and WordPad where Enter is a line break. Elsewhere (browsers, Discord, Slack, Teams and other Electron or web apps), text containing line breaks is pasted. Pasting inserts the breaks without submitting the message. The clipboard is restored afterwards and the temporary text is kept out of clipboard history. Single-line text is typed directly with Unicode input and doesn't touch the clipboard. **Always type** in Settings uses Shift+Enter for line breaks instead.
+
+**Formatting.**
+
+- **Smart Only:** a tiny deterministic layer converts standalone "new line" / "new paragraph" into line breaks. A phrase counts only after punctuation or a line break and followed by the end or a new sentence, so "add a new line of code" stays literal, and a break SMART already produced isn't doubled.
+- **Prompt Cleanup:** formatting is left to the model through an app-managed *Formatting Rules* section. That section, plus *Progressive Dictation Rules* in progressive mode, is appended after your system prompt on every request; your editable prompt is never modified.
 
 ### Gemini APIs used (verified against Google's documentation and SDK, October 2026)
 
@@ -156,7 +189,7 @@ Or run the **Release** workflow manually from the Actions tab and enter a tag. T
 
 ### Tests
 
-- `tests/Rambler.Core.Tests`: 142 deterministic unit tests. They need no API key or Windows. Coverage:
+- `tests/Rambler.Core.Tests`: 207 deterministic unit tests. They need no API key or Windows. Coverage:
   - the state machine and hotkey mode selection, including the Smart Only bypass
   - transcript accumulation and interim/final de-duplication
   - Live protocol messages
@@ -166,6 +199,13 @@ Or run the **Release** workflow manually from the Actions tab and enter a tag. T
   - settings persistence and secret handling
   - audio conversion
   - coordinator flows (cleanup failure offers, insertion fallback, microphone release, rapid toggling)
+  - progressive dictation:
+    - pause endpointing, in-order exactly-once commits, and the fallback-repaired utterance
+    - thought chunking and ordered chunk cleanup with read-only context (including slow responses)
+    - Smart Only bypass and spoken "new line" / "new paragraph"
+    - focus loss (pause and resume), destroyed targets, partial typing without duplicates, and cleanup failure recovery
+    - empty chunks, stale events from a cancelled session, stop/restart races
+    - preservation of a customized system prompt
 - `tests/Rambler.IntegrationTests`: optional live tests, skipped unless configured:
   ```powershell
   $env:GEMINI_API_KEY = "..."
@@ -181,25 +221,36 @@ src/Rambler.Core/            Platform-neutral logic (net10.0, unit-tested)
   Transcription/             LiveProtocol, GeminiLiveConnection, LiveTranscriptionSession,
                              TranscriptAccumulator, GeminiRecordedTranscriber
   Cleanup/                   DefaultPrompts, CleanupPromptBuilder, GeminiCleanupService
-  Dictation/                 DictationStateMachine, DictationCoordinator, ITextInserter
+  Dictation/                 DictationStateMachine, DictationCoordinator, ProgressiveOutput,
+                             ThoughtBuffer, SpokenFormatting, ITextInserter
   Gemini/                    Endpoints, HTTP + error mapping, connection tester, Redactor
   Settings/                  AppSettings, SettingsService, HotkeyGesture, ICredentialStore
 src/Rambler/                 Windows app (net10.0-windows, WPF)
   App.xaml.cs                AppHost: composition, tray lifecycle, single instance
   Services/                  TrayService, HotkeyService (RegisterHotKey), WasapiAudioSource,
-                             TextInsertionService, ClipboardHelper, WindowsCredentialStore,
+                             TargetWindowService, TextInsertionService, ClipboardHelper, WindowsCredentialStore,
                              StartupRegistration, ThemeService, FeedbackSounds
   Views/, ViewModels/        Popup and Settings (light MVVM)
   Themes/                    Light/Dark palettes and the popup's control styles
 tests/                       Unit tests and optional live integration tests
 ```
 
-**Future incremental insertion.** Each live segment already commits final text independently (`TranscriptAccumulator.FinalText`), and insertion sits behind `ITextInserter`. Inserting committed segments as they arrive would mean adding a segment-committed event to `ITranscriptionSession` and calling the inserter from the coordinator. Nothing else needs rewriting.
+
+## Known limitations
+
+- **Utterance splitting uses audio level.** Very noisy rooms may never look silent; text then appears at the 60-second cap or when you stop. Each utterance is SMART-cleaned on its own, so a self-correction spoken across a long pause isn't merged in Smart Only. Prompt Cleanup's context handles it.
+- **Text is added at the caret.** Rambler can't see the caret position, so if you move the cursor or type yourself while dictating, new text goes wherever the caret is. Rambler never deletes or rewrites what's already there.
+- **Field identity uses UI Automation where the app supports it.** Apps without accessibility support fall back to window/control-handle checks, which can't tell two fields in the same browser window apart.
+- **Line breaks outside classic editors use the clipboard.** It's restored afterwards when that's safe; complex formats such as metafiles can't be restored.
+- **Elevated (administrator) apps can't receive typed text.** Windows blocks it from a normal app; use **Copy**.
+- **Chunk timing has no settings.** The defaults above are deliberately conservative.
 
 ## Troubleshooting
 
 - **"Shortcut conflict" at startup:** Windows or another app already owns the shortcut. Windows uses `Ctrl+Win+Space` to switch back to the previous keyboard input method, so if you use several input languages, go to Settings › General, click **Record** and press another combination (e.g. `Ctrl+Alt+Space`), or **Clear** it and use the popup's microphone button. Each shortcut shows whether it's active. Note that shortcuts Windows grabs first, such as `Win+Space`, can't be recorded at all.
-- **Text went to the clipboard instead of being typed:** the target app runs as administrator (Windows blocks typing into elevated apps from normal apps), or focus moved. Press `Ctrl+V`.
+- **Status says "Waiting for target":** you're in a different app or a different field than when you started. Click back into the original text field and insertion continues. Or stop, then use **Insert** (it goes where you were last typing) or **Copy**.
+- **"No editable target":** dictation started while the desktop, a file list or a button had focus. The text is kept; stop, click into a text field, open the popup and press **Insert**.
+- **Text went to the clipboard instead of being typed:** the target app runs as administrator (Windows blocks typing into elevated apps from normal apps). Press `Ctrl+V`.
 - **Microphone access is blocked:** Windows Settings › Privacy & security › Microphone › enable *Let desktop apps access your microphone*.
 - **Live preview unavailable:** the live model couldn't be reached. With fallback on, Rambler keeps recording and transcribes the audio when you stop. Settings › Gemini › **Test connection** shows which step fails.
 - **Language:** leave it empty unless detection gets it wrong. A third-party report says setting language codes on the live model may disable SMART formatting. That's unconfirmed, but auto-detect avoids the question.
@@ -209,16 +260,24 @@ tests/                       Unit tests and optional live integration tests
 What has been verified so far:
 
 - The solution builds in Release with zero warnings, and the self-contained `win-x64` single-file publish works. Both were run on Linux with the .NET 10.0.112 SDK, which bundles runtime 10.0.12.
-- All 142 unit tests pass. They ran repeatedly with no flakiness, and a deliberate code mutation was caught.
+- All 207 unit tests pass, on Linux and on the Windows release runner. They ran repeatedly with no flakiness, and a deliberate code mutation was caught.
+- The tray, popup and Settings windows of 0.1.x were confirmed running on Windows by the user.
 - The real Gemini endpoints were probed with a deliberately invalid key. Both `generateContent` and the Live `BidiGenerateContent` WebSocket accepted the request shape and header authentication, and returned `API key not valid`, which Rambler maps to its invalid-key error.
 
-**Not yet verified:** no API key was available, so live transcription and cleanup have not run against real audio or text. The WPF app was compiled but not launched, because the build environment is Linux. To finish verification on a Windows PC:
+**Not yet verified:**
+
+- No API key was available, so live transcription and cleanup have not run against real audio or text.
+- Progressive insertion (UI Automation focus tracking, paste-based line breaks) was compiled but has not been exercised against real apps. Behavior in Notepad, browser textareas, Discord and rich-text editors still needs hands-on testing.
+
+To finish verification on a Windows PC:
 
 1. `./build.ps1`, then run `artifacts\publish\win-x64\Rambler.exe`. Check the tray icon appears, left-click opens the popup, and right-click shows Settings / Restart / Exit.
 2. In Settings › Gemini, enter your key and click **Test connection**. All four checks should pass.
 3. In Settings › Audio, click **Test microphone**. The level meter should move and you should hear the playback.
-4. Open Notepad, press `Ctrl+Win+Space`, speak with pauses and self-corrections, then press it again. You should see the live preview, then cleaned text inserted into Notepad.
-5. Repeat with `Ctrl+Win+Shift+Space`. The SMART transcript should be inserted with no cleanup call, and the popup should still show **Prompt Cleanup** selected.
-6. Start dictation from the popup's button, then stop it from the popup. Text should go to the previous app, not the popup.
-7. Unplug the microphone while dictating. The recorded part should be finished and inserted, and the tray icon should no longer be red.
-8. Optionally run `./build.ps1 -LiveTests` with `GEMINI_API_KEY` and `RAMBLER_TEST_WAV` set.
+4. Open Notepad, press `Ctrl+Win+Space`, speak a few sentences with pauses and self-corrections. Cleaned text should appear while you're still talking. Say "new paragraph" and check for a blank line. Press the shortcut again to stop.
+5. Do the same in a browser textarea and in Discord. Line breaks must appear without the message being sent.
+6. While dictating, click into another app. The status should show *Waiting for target* and nothing should be typed there. Click back and insertion should resume.
+7. Repeat with `Ctrl+Win+Shift+Space`. SMART text should appear phrase by phrase with no cleanup, and the popup should still show **Prompt Cleanup** selected.
+8. Start dictation from the popup's button, then stop it from the popup. Text should go to the previous app, not the popup.
+9. Unplug the microphone while dictating. The recorded part should be finished and inserted, and the tray icon should no longer be red.
+10. Optionally run `./build.ps1 -LiveTests` with `GEMINI_API_KEY` and `RAMBLER_TEST_WAV` set.

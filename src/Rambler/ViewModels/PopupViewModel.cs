@@ -63,15 +63,19 @@ public sealed class PopupViewModel : ObservableObject
     public bool IsBusy => State.IsBusy();
     public bool CanCancel => State is DictationState.Listening or DictationState.Finalizing or DictationState.Cleaning;
 
-    public string StatusText => State switch
+    /// <summary>Listening, Processing, Inserting, Waiting for target, Completed or Error.</summary>
+    public string StatusText => (State, _coordinator.OutputState) switch
     {
-        DictationState.Idle => "Ready",
-        DictationState.Listening => _coordinator.ActiveMode == DictationMode.SmartOnly ? "Listening · Smart Only" : "Listening · Cleanup",
-        DictationState.Finalizing => "Finalizing…",
-        DictationState.Cleaning => "Cleaning up…",
-        DictationState.Inserting => "Inserting…",
-        DictationState.Error => "Needs attention",
-        _ => string.Empty,
+        (DictationState.Error, _) => "Error",
+        (_, OutputStatus.WaitingForTarget) => "Waiting for target",
+        (_, OutputStatus.Halted) when State != DictationState.Idle => "Error",
+        (DictationState.Listening, OutputStatus.Inserting) => "Inserting",
+        (DictationState.Listening, OutputStatus.Processing) => "Processing",
+        (DictationState.Listening, _) => _coordinator.ActiveMode == DictationMode.SmartOnly ? "Listening · Smart Only" : "Listening · Cleanup",
+        (DictationState.Finalizing or DictationState.Cleaning, _) => "Processing",
+        (DictationState.Inserting, _) => "Inserting",
+        (DictationState.Idle, _) when _coordinator.LastCompleted => "Completed",
+        _ => "Ready",
     };
 
     public string MicButtonText => State switch
@@ -152,9 +156,13 @@ public sealed class PopupViewModel : ObservableObject
         HotkeyText = settings.HotkeyToggle;
         BypassHotkeyText = settings.HotkeySmartBypass;
         NeedsApiKey = !_hasApiKey();
-        TargetText = State is DictationState.Listening or DictationState.Finalizing or DictationState.Cleaning
-            ? "Into: " + _coordinator.TargetDescription
-            : string.Empty;
+        TargetText = State is DictationState.Idle or DictationState.Error
+            ? string.Empty
+            : _coordinator.Target.CanReceiveText
+                ? (_coordinator.OutputState == OutputStatus.WaitingForTarget
+                    ? $"Into: {_coordinator.Target.DisplayName} · click back into it to continue"
+                    : "Into: " + _coordinator.Target.DisplayName)
+                : "No editable target · text is kept for you";
 
         if (_isCleanupMode != (settings.DefaultMode == DictationMode.PromptCleanup))
         {

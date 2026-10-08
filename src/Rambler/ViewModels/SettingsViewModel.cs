@@ -107,8 +107,8 @@ public sealed class SettingsViewModel : ObservableObject
 
     public IReadOnlyList<Choice<InsertionMethod>> InsertionMethods { get; } =
     [
-        new(InsertionMethod.Auto, "Automatic (type short text, paste long or multi-line text)"),
-        new(InsertionMethod.Type, "Always type"),
+        new(InsertionMethod.Auto, "Automatic (type text; paste line breaks safely)"),
+        new(InsertionMethod.Type, "Always type (line breaks as Shift+Enter)"),
         new(InsertionMethod.Paste, "Always paste via clipboard"),
     ];
     public Choice<InsertionMethod> SelectedInsertionMethod
@@ -118,6 +118,22 @@ public sealed class SettingsViewModel : ObservableObject
     }
 
     public bool RestoreClipboard { get => _s.RestoreClipboard; set { _s.RestoreClipboard = value; OnPropertyChanged(); } }
+
+    /// <summary>Default: text is inserted while you speak. The alternative buffers and inserts when you stop.</summary>
+    public bool InsertProgressively
+    {
+        get => !_s.InsertWhenFinished;
+        set { _s.InsertWhenFinished = !value; OnPropertyChanged(); OnPropertyChanged(nameof(InsertWhenFinished)); }
+    }
+
+    public bool InsertWhenFinished
+    {
+        get => _s.InsertWhenFinished;
+        set { _s.InsertWhenFinished = value; OnPropertyChanged(); OnPropertyChanged(nameof(InsertProgressively)); }
+    }
+
+    /// <summary>Rambler's mandatory formatting/progressive instructions, appended after the editable prompt.</summary>
+    public string ManagedPromptText { get; } = CleanupPromptBuilder.ManagedInstructions(progressive: true);
     public bool PlaySounds { get => _s.PlaySounds; set { _s.PlaySounds = value; OnPropertyChanged(); } }
     public string HotkeyToggle { get => _hotkeyToggle; set => Set(ref _hotkeyToggle, value); }
     public string HotkeyBypass { get => _hotkeyBypass; set => Set(ref _hotkeyBypass, value); }

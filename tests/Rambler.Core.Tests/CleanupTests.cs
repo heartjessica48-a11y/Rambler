@@ -128,7 +128,7 @@ public class GeminiCleanupServiceTests
         var (service, handler) = Create();
         handler.Respond(HttpStatusCode.OK, Candidate(("thinking...", true), ("Clean ", false), ("text.", false)));
 
-        var result = await service.CleanAsync("raw", Options, Key, CancellationToken.None);
+        var result = await service.CleanAsync(new CleanupRequest("raw"), Options, Key, CancellationToken.None);
 
         Assert.Equal("Clean text.", result);
         var request = Assert.Single(handler.Requests);
@@ -144,7 +144,7 @@ public class GeminiCleanupServiceTests
         handler.Respond(HttpStatusCode.BadRequest,
             """{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}""");
 
-        var ex = await Assert.ThrowsAsync<GeminiException>(() => service.CleanAsync("raw", Options, Key, CancellationToken.None));
+        var ex = await Assert.ThrowsAsync<GeminiException>(() => service.CleanAsync(new CleanupRequest("raw"), Options, Key, CancellationToken.None));
         Assert.Equal(GeminiErrorKind.InvalidApiKey, ex.Kind);
         Assert.True(ex.IsFatal);
     }
@@ -157,7 +157,7 @@ public class GeminiCleanupServiceTests
                 r => r.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromMilliseconds(10)))
                .Respond(HttpStatusCode.TooManyRequests, """{"error":{"message":"Resource has been exhausted"}}""");
 
-        var ex = await Assert.ThrowsAsync<GeminiException>(() => service.CleanAsync("raw", Options, Key, CancellationToken.None));
+        var ex = await Assert.ThrowsAsync<GeminiException>(() => service.CleanAsync(new CleanupRequest("raw"), Options, Key, CancellationToken.None));
         Assert.Equal(GeminiErrorKind.QuotaExceeded, ex.Kind);
         Assert.Equal(2, handler.Requests.Count);
     }
@@ -169,7 +169,7 @@ public class GeminiCleanupServiceTests
         handler.Respond(HttpStatusCode.BadRequest, """{"error":{"message":"thinking_level MINIMAL is not supported for this model"}}""")
                .Respond(HttpStatusCode.OK, Candidate(("ok", false)));
 
-        Assert.Equal("ok", await service.CleanAsync("raw", Options, Key, CancellationToken.None));
+        Assert.Equal("ok", await service.CleanAsync(new CleanupRequest("raw"), Options, Key, CancellationToken.None));
         Assert.Contains("thinkingConfig", handler.Requests[0].Body);
         Assert.DoesNotContain("thinkingConfig", handler.Requests[1].Body);
     }
@@ -179,7 +179,7 @@ public class GeminiCleanupServiceTests
     {
         var (service, handler) = Create();
         handler.Respond(HttpStatusCode.NotFound, """{"error":{"message":"models/nope is not found"}}""");
-        var ex = await Assert.ThrowsAsync<GeminiException>(() => service.CleanAsync("raw", Options, Key, CancellationToken.None));
+        var ex = await Assert.ThrowsAsync<GeminiException>(() => service.CleanAsync(new CleanupRequest("raw"), Options, Key, CancellationToken.None));
         Assert.Equal(GeminiErrorKind.ModelUnavailable, ex.Kind);
     }
 
@@ -191,9 +191,9 @@ public class GeminiCleanupServiceTests
                .Respond(HttpStatusCode.OK, """{"candidates":[{"content":{"parts":[]},"finishReason":"SAFETY"}]}""")
                .Respond(HttpStatusCode.OK, """{"candidates":[{"content":{"parts":[{"text":"   "}]}}]}""");
 
-        Assert.Equal(GeminiErrorKind.Blocked, (await Assert.ThrowsAsync<GeminiException>(() => service.CleanAsync("a", Options, Key, default))).Kind);
-        Assert.Equal(GeminiErrorKind.Blocked, (await Assert.ThrowsAsync<GeminiException>(() => service.CleanAsync("a", Options, Key, default))).Kind);
-        Assert.Equal(GeminiErrorKind.EmptyResult, (await Assert.ThrowsAsync<GeminiException>(() => service.CleanAsync("a", Options, Key, default))).Kind);
+        Assert.Equal(GeminiErrorKind.Blocked, (await Assert.ThrowsAsync<GeminiException>(() => service.CleanAsync(new CleanupRequest("a"), Options, Key, default))).Kind);
+        Assert.Equal(GeminiErrorKind.Blocked, (await Assert.ThrowsAsync<GeminiException>(() => service.CleanAsync(new CleanupRequest("a"), Options, Key, default))).Kind);
+        Assert.Equal(GeminiErrorKind.EmptyResult, (await Assert.ThrowsAsync<GeminiException>(() => service.CleanAsync(new CleanupRequest("a"), Options, Key, default))).Kind);
     }
 
     [Fact]
@@ -201,7 +201,7 @@ public class GeminiCleanupServiceTests
     {
         var handler = new FakeHttpHandler().Respond(_ => throw new HttpRequestException("No route to host"));
         var service = new GeminiCleanupService(new GeminiHttp(new HttpClient(handler)));
-        var ex = await Assert.ThrowsAsync<GeminiException>(() => service.CleanAsync("a", Options, Key, default));
+        var ex = await Assert.ThrowsAsync<GeminiException>(() => service.CleanAsync(new CleanupRequest("a"), Options, Key, default));
         Assert.Equal(GeminiErrorKind.Network, ex.Kind);
     }
 
@@ -212,6 +212,6 @@ public class GeminiCleanupServiceTests
         handler.Respond(HttpStatusCode.OK, Candidate(("never", false)));
         using var cts = new CancellationTokenSource();
         cts.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.CleanAsync("a", Options, Key, cts.Token));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.CleanAsync(new CleanupRequest("a"), Options, Key, cts.Token));
     }
 }

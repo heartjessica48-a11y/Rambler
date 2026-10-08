@@ -6,7 +6,7 @@ public enum ThemePreference { System, Light, Dark }
 
 public enum InsertionMethod
 {
-    /// <summary>Type short single-line text; paste long or multi-line text.</summary>
+    /// <summary>Type text; for line breaks, use Enter only in plain editors and paste elsewhere (never submits).</summary>
     Auto,
     Type,
     Paste,
@@ -36,6 +36,11 @@ public sealed class AppSettings
     public ThemePreference Theme { get; set; } = ThemePreference.System;
     public bool PlaySounds { get; set; }
     public InsertionMethod InsertionMethod { get; set; } = InsertionMethod.Auto;
+    /// <summary>
+    /// False (default): progressive insertion, text appears as you speak. True: buffer the whole dictation
+    /// and insert it at the end (best whole-session coherence).
+    /// </summary>
+    public bool InsertWhenFinished { get; set; }
     public bool RestoreClipboard { get; set; } = true;
 
     // Audio
