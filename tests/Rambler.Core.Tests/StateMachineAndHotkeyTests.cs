@@ -126,12 +126,17 @@ public class HotkeyGestureTests
     }
 
     [Fact]
-    public void Default_shortcuts_are_valid_and_distinct()
+    public void No_shortcuts_are_set_by_default()
     {
         var s = new AppSettings();
-        Assert.True(HotkeyGesture.TryParse(s.HotkeyToggle, out var a));
-        Assert.True(HotkeyGesture.TryParse(s.HotkeySmartBypass, out var b));
-        Assert.NotEqual(a, b);
-        Assert.Equal(0x2 | 0x8, (int)a.Modifiers); // MOD_CONTROL | MOD_WIN
+        Assert.Equal("", s.HotkeyToggle);
+        Assert.Equal("", s.HotkeySmartBypass);
+    }
+
+    [Fact]
+    public void Modifier_flags_match_win32()
+    {
+        Assert.True(HotkeyGesture.TryParse("Ctrl+Win+Space", out var g));
+        Assert.Equal(0x2 | 0x8, (int)g.Modifiers); // MOD_CONTROL | MOD_WIN
     }
 }

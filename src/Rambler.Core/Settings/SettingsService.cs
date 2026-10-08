@@ -67,6 +67,7 @@ public sealed class SettingsService
             if (!File.Exists(FilePath)) return new AppSettings();
             var json = File.ReadAllText(FilePath);
             var settings = JsonSerializer.Deserialize<AppSettings>(json, s_json) ?? new AppSettings();
+            Migrate(settings);
             settings.Normalize();
             return settings;
         }
@@ -76,6 +77,18 @@ public sealed class SettingsService
             try { File.Copy(FilePath, FilePath + ".bak", overwrite: true); } catch { /* best effort */ }
             return new AppSettings();
         }
+    }
+
+    /// <summary>
+    /// Version 1 shipped Ctrl+Win+Space / Ctrl+Win+Shift+Space as defaults, which Windows itself uses.
+    /// Clear them only if they are still those old defaults; shortcuts the user recorded are kept.
+    /// </summary>
+    internal static void Migrate(AppSettings settings)
+    {
+        if (settings.SchemaVersion >= AppSettings.CurrentSchemaVersion) return;
+        if (settings.HotkeyToggle == "Ctrl+Win+Space") settings.HotkeyToggle = string.Empty;
+        if (settings.HotkeySmartBypass == "Ctrl+Win+Shift+Space") settings.HotkeySmartBypass = string.Empty;
+        settings.SchemaVersion = AppSettings.CurrentSchemaVersion;
     }
 
     internal static string Serialize(AppSettings settings) => JsonSerializer.Serialize(settings, s_json);

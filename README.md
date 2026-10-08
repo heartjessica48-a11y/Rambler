@@ -5,10 +5,14 @@ A small Windows tray utility for AI dictation. Speak naturally (think aloud, cha
 - **Prompt Cleanup** (default): microphone → Gemini SMART transcription → Gemini Flash cleanup → text inserted.
 - **Smart Only**: microphone → Gemini SMART transcription → text inserted. No second model.
 
+Start dictation with the popup's microphone button, or with two optional global shortcuts:
+
 | Shortcut | Action |
 |---|---|
-| `Ctrl + Win + Space` | Start/stop dictation in the selected mode |
-| `Ctrl + Win + Shift + Space` | Start/stop dictation as **Smart Only**, without changing your selected mode |
+| Main shortcut | Start/stop dictation in the selected mode |
+| Bypass shortcut | Start/stop dictation as **Smart Only**, without changing your selected mode |
+
+No shortcuts are set out of the box, because the obvious combinations (such as `Ctrl+Win+Space`) are already used by Windows on many PCs. Record your own in Settings › General (for example `Ctrl+Alt+Space` and `Ctrl+Alt+Shift+Space`).
 
 Native .NET 10 + WPF. No Electron, no Python, no browser engine, no background services. Dependencies: NAudio (WASAPI capture) and the .NET runtime.
 
@@ -25,7 +29,7 @@ Requirements: Windows 10 (1809+) or Windows 11, x64, a microphone, and a Gemini 
 
 ## Use
 
-- **Dictate:** put the cursor where you want text, press `Ctrl+Win+Space` and talk. Text appears in that app **while you speak**: each finished phrase (Smart Only) or each finished thought (Prompt Cleanup) is inserted as soon as it's stable. Press the shortcut again to stop; the last words are flushed then. Prefer one insert at the end? Settings › General › **When I finish**.
+- **Dictate:** put the cursor where you want text, press your shortcut (or click the microphone in the popup) and talk. Text appears in that app **while you speak**: each finished phrase (Smart Only) or each finished thought (Prompt Cleanup) is inserted as soon as it's stable. Press the shortcut (or the button) again to stop; the last words are flushed then. Prefer one insert at the end? Settings › General › **When I finish**.
 - **Tray icon:** blue = ready, **red = microphone on**, amber = working, grey `!` = needs attention.
 - **Left-click the tray icon** for the popup, which opens right at the icon: mode switch, start/stop button, live preview, input level, and hotkey reminders. Click anywhere else to dismiss it. Dictation keeps running.
 - **Right-click the tray icon** for Settings, Restart and Exit.
@@ -247,7 +251,7 @@ tests/                       Unit tests and optional live integration tests
 
 ## Troubleshooting
 
-- **"Shortcut conflict" at startup:** Windows or another app already owns the shortcut. Windows uses `Ctrl+Win+Space` to switch back to the previous keyboard input method, so if you use several input languages, go to Settings › General, click **Record** and press another combination (e.g. `Ctrl+Alt+Space`), or **Clear** it and use the popup's microphone button. Each shortcut shows whether it's active. Note that shortcuts Windows grabs first, such as `Win+Space`, can't be recorded at all.
+- **"Shortcut conflict":** Windows or another app already owns the shortcut. For example, Windows uses `Ctrl+Win+Space` to switch back to the previous keyboard input method. Go to Settings › General, click **Record** and press another combination (e.g. `Ctrl+Alt+Space`), or **Clear** it and use the popup's microphone button. Each shortcut shows whether it's active. Note that shortcuts Windows grabs first, such as `Win+Space`, can't be recorded at all.
 - **Status says "Waiting for target":** you're in a different app or a different field than when you started. Click back into the original text field and insertion continues. Or stop, then use **Insert** (it goes where you were last typing) or **Copy**.
 - **"No editable target":** dictation started while the desktop, a file list or a button had focus. The text is kept; stop, click into a text field, open the popup and press **Insert**.
 - **Text went to the clipboard instead of being typed:** the target app runs as administrator (Windows blocks typing into elevated apps from normal apps). Press `Ctrl+V`.
@@ -274,10 +278,10 @@ To finish verification on a Windows PC:
 1. `./build.ps1`, then run `artifacts\publish\win-x64\Rambler.exe`. Check the tray icon appears, left-click opens the popup, and right-click shows Settings / Restart / Exit.
 2. In Settings › Gemini, enter your key and click **Test connection**. All four checks should pass.
 3. In Settings › Audio, click **Test microphone**. The level meter should move and you should hear the playback.
-4. Open Notepad, press `Ctrl+Win+Space`, speak a few sentences with pauses and self-corrections. Cleaned text should appear while you're still talking. Say "new paragraph" and check for a blank line. Press the shortcut again to stop.
+4. Record a shortcut in Settings › General. Open Notepad, press it, speak a few sentences with pauses and self-corrections. Cleaned text should appear while you're still talking. Say "new paragraph" and check for a blank line. Press the shortcut again to stop.
 5. Do the same in a browser textarea and in Discord. Line breaks must appear without the message being sent.
 6. While dictating, click into another app. The status should show *Waiting for target* and nothing should be typed there. Click back and insertion should resume.
-7. Repeat with `Ctrl+Win+Shift+Space`. SMART text should appear phrase by phrase with no cleanup, and the popup should still show **Prompt Cleanup** selected.
+7. Repeat with the bypass shortcut. SMART text should appear phrase by phrase with no cleanup, and the popup should still show **Prompt Cleanup** selected.
 8. Start dictation from the popup's button, then stop it from the popup. Text should go to the previous app, not the popup.
 9. Unplug the microphone while dictating. The recorded part should be finished and inserted, and the tray icon should no longer be red.
 10. Optionally run `./build.ps1 -LiveTests` with `GEMINI_API_KEY` and `RAMBLER_TEST_WAV` set.

@@ -24,15 +24,17 @@ public sealed class AppSettings
     public const string DefaultThinkingLevel = "MINIMAL";
     public const int DefaultTechnicalRefinement = 35;
 
-    public int SchemaVersion { get; set; } = 1;
+    /// <summary>2: shortcuts are off by default (the old Ctrl+Win+Space defaults clash with Windows).</summary>
+    public int SchemaVersion { get; set; } = CurrentSchemaVersion;
+    public const int CurrentSchemaVersion = 2;
 
     // General
     public bool StartWithWindows { get; set; }
     public DictationMode DefaultMode { get; set; } = DictationMode.PromptCleanup;
-    /// <summary>Main shortcut; empty disables it.</summary>
-    public string HotkeyToggle { get; set; } = "Ctrl+Win+Space";
-    /// <summary>Smart Only bypass shortcut; empty disables it.</summary>
-    public string HotkeySmartBypass { get; set; } = "Ctrl+Win+Shift+Space";
+    /// <summary>Main shortcut; empty (the default) disables it. The user records their own.</summary>
+    public string HotkeyToggle { get; set; } = string.Empty;
+    /// <summary>Smart Only bypass shortcut; empty (the default) disables it.</summary>
+    public string HotkeySmartBypass { get; set; } = string.Empty;
     public ThemePreference Theme { get; set; } = ThemePreference.System;
     public bool PlaySounds { get; set; }
     public InsertionMethod InsertionMethod { get; set; } = InsertionMethod.Auto;

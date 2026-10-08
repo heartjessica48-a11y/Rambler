@@ -18,8 +18,8 @@ public sealed class SettingsServiceTests : IDisposable
     {
         var s = new SettingsService(FilePath).Current;
         Assert.Equal(DictationMode.PromptCleanup, s.DefaultMode);
-        Assert.Equal("Ctrl+Win+Space", s.HotkeyToggle);
-        Assert.Equal("Ctrl+Win+Shift+Space", s.HotkeySmartBypass);
+        Assert.Equal("", s.HotkeyToggle); // no shortcuts out of the box: the user records their own
+        Assert.Equal("", s.HotkeySmartBypass);
         Assert.Equal(35, s.TechnicalRefinement);
         Assert.Equal("gemini-3.5-transcribe-live", s.LiveModel);
         Assert.Equal("gemini-3.5-transcribe", s.RecordedModel);
@@ -56,21 +56,32 @@ public sealed class SettingsServiceTests : IDisposable
     {
         var service = new SettingsService(FilePath);
         var s = service.Current;
+        s.HotkeyToggle = "Ctrl+Alt+D";
         s.HotkeySmartBypass = "";
         service.Save(s);
         var reloaded = new SettingsService(FilePath).Current;
         Assert.Equal("", reloaded.HotkeySmartBypass);
-        Assert.Equal("Ctrl+Win+Space", reloaded.HotkeyToggle);
+        Assert.Equal("Ctrl+Alt+D", reloaded.HotkeyToggle);
     }
 
     [Fact]
-    public void Shortcuts_missing_from_an_older_file_get_defaults()
+    public void Old_default_shortcuts_are_cleared_once_but_recorded_ones_are_kept()
     {
         Directory.CreateDirectory(_dir);
-        File.WriteAllText(FilePath, """{"theme":"Dark"}""");
+        File.WriteAllText(FilePath, """{"schemaVersion":1,"hotkeyToggle":"Ctrl+Win+Space","hotkeySmartBypass":"Ctrl+Alt+S"}""");
         var s = new SettingsService(FilePath).Current;
-        Assert.Equal("Ctrl+Win+Space", s.HotkeyToggle);
-        Assert.Equal("Ctrl+Win+Shift+Space", s.HotkeySmartBypass);
+        Assert.Equal("", s.HotkeyToggle);
+        Assert.Equal("Ctrl+Alt+S", s.HotkeySmartBypass);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, s.SchemaVersion);
+    }
+
+    [Fact]
+    public void Migration_runs_only_once()
+    {
+        // A user on schema 2 who deliberately records Ctrl+Win+Space keeps it.
+        Directory.CreateDirectory(_dir);
+        File.WriteAllText(FilePath, """{"schemaVersion":2,"hotkeyToggle":"Ctrl+Win+Space"}""");
+        Assert.Equal("Ctrl+Win+Space", new SettingsService(FilePath).Current.HotkeyToggle);
     }
 
     [Fact]

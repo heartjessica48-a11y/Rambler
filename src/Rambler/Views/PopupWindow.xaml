@@ -143,6 +143,8 @@
             <!-- Footer: hotkeys -->
             <Grid Margin="0,12,0,0">
                 <StackPanel VerticalAlignment="Center">
+                    <TextBlock FontSize="11" Foreground="{DynamicResource Rambler.SubtleText}" Text="No shortcut set · Settings › General › Record"
+                               Visibility="{Binding HasNoHotkeys, Converter={StaticResource BoolToVisibility}}" />
                     <TextBlock FontSize="11" Foreground="{DynamicResource Rambler.SubtleText}"
                                Visibility="{Binding HasHotkey, Converter={StaticResource BoolToVisibility}}">
                         <Run Text="{Binding HotkeyText, Mode=OneWay}" FontWeight="SemiBold" /><Run Text="  dictate" />
