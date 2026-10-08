@@ -30,8 +30,10 @@ public sealed class SettingsViewModel : ObservableObject
 
     private string _hotkeyToggle;
     private string _hotkeyBypass;
-    private string? _hotkeyStatus;
-    private bool _hotkeyStatusIsError;
+    private string? _toggleStatus;
+    private bool _toggleStatusIsError;
+    private string? _bypassStatus;
+    private bool _bypassStatusIsError;
     private double _micLevel;
     private string? _micTestStatus;
     private bool _micTesting;
@@ -45,7 +47,7 @@ public sealed class SettingsViewModel : ObservableObject
 
     public SettingsViewModel(SettingsService settingsService, WindowsCredentialStore credentials, GeminiConnectionTester tester,
         Func<string, string, IReadOnlyList<HotkeyRegistration>> applyHotkeys, Action<ThemePreference> applyTheme,
-        string? lastError, Dispatcher dispatcher)
+        IReadOnlyList<HotkeyRegistration> currentHotkeys, string? lastError, Dispatcher dispatcher)
     {
         _settingsService = settingsService;
         _credentials = credentials;
@@ -58,6 +60,7 @@ public sealed class SettingsViewModel : ObservableObject
 
         _hotkeyToggle = _s.HotkeyToggle;
         _hotkeyBypass = _s.HotkeySmartBypass;
+        ShowHotkeyResults(currentHotkeys);
         _vocabularyText = string.Join(", ", _s.CustomVocabulary);
         _cleanupPrompt = _s.CleanupPrompt ?? DefaultPrompts.CleanupSystemPrompt;
         LastError = lastError;
@@ -118,8 +121,10 @@ public sealed class SettingsViewModel : ObservableObject
     public bool PlaySounds { get => _s.PlaySounds; set { _s.PlaySounds = value; OnPropertyChanged(); } }
     public string HotkeyToggle { get => _hotkeyToggle; set => Set(ref _hotkeyToggle, value); }
     public string HotkeyBypass { get => _hotkeyBypass; set => Set(ref _hotkeyBypass, value); }
-    public string? HotkeyStatus { get => _hotkeyStatus; private set => Set(ref _hotkeyStatus, value); }
-    public bool HotkeyStatusIsError { get => _hotkeyStatusIsError; private set => Set(ref _hotkeyStatusIsError, value); }
+    public string? ToggleStatus { get => _toggleStatus; private set => Set(ref _toggleStatus, value); }
+    public bool ToggleStatusIsError { get => _toggleStatusIsError; private set => Set(ref _toggleStatusIsError, value); }
+    public string? BypassStatus { get => _bypassStatus; private set => Set(ref _bypassStatus, value); }
+    public bool BypassStatusIsError { get => _bypassStatusIsError; private set => Set(ref _bypassStatusIsError, value); }
 
     // ---- Audio ----
     public ObservableCollection<Choice<string?>> Devices { get; }
@@ -175,21 +180,36 @@ public sealed class SettingsViewModel : ObservableObject
 
     public void Save()
     {
-        if (!HotkeyGesture.TryParse(HotkeyToggle, out var main) || !HotkeyGesture.TryParse(HotkeyBypass, out var bypass))
+        // Shortcuts are optional: empty disables one. Non-empty ones must be valid and distinct.
+        var toggleText = (HotkeyToggle ?? string.Empty).Trim();
+        var bypassText = (HotkeyBypass ?? string.Empty).Trim();
+        HotkeyGesture main = default, bypass = default;
+        var valid = true;
+        if (toggleText.Length > 0 && !HotkeyGesture.TryParse(toggleText, out main))
         {
-            SetHotkeyStatus("Enter shortcuts like Ctrl+Win+Space (at least one modifier).", error: true);
-            SaveStatus = "Fix the shortcut on the General tab.";
-            return;
+            SetStatus(HotkeyAction.ToggleDefault, InvalidShortcut, error: true);
+            valid = false;
         }
-        if (main == bypass)
+        if (bypassText.Length > 0 && !HotkeyGesture.TryParse(bypassText, out bypass))
         {
-            SetHotkeyStatus("The two shortcuts must be different.", error: true);
+            SetStatus(HotkeyAction.ToggleSmartBypass, InvalidShortcut, error: true);
+            valid = false;
+        }
+        if (valid && toggleText.Length > 0 && bypassText.Length > 0 && main == bypass)
+        {
+            SetStatus(HotkeyAction.ToggleSmartBypass, "Same shortcut as the main one. Record a different one, or clear it.", error: true);
+            valid = false;
+        }
+        if (!valid)
+        {
             SaveStatus = "Fix the shortcut on the General tab.";
             return;
         }
 
-        _s.HotkeyToggle = main.ToString();
-        _s.HotkeySmartBypass = bypass.ToString();
+        _s.HotkeyToggle = toggleText.Length > 0 ? main.ToString() : string.Empty;
+        _s.HotkeySmartBypass = bypassText.Length > 0 ? bypass.ToString() : string.Empty;
+        HotkeyToggle = _s.HotkeyToggle;
+        HotkeyBypass = _s.HotkeySmartBypass;
         _s.MicrophoneDeviceId = SelectedDevice.Value;
         _s.CustomVocabulary = VocabularyText.Split([',', '\n', ';'], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToList();
         _s.CleanupPrompt = string.IsNullOrWhiteSpace(CleanupPrompt) ? null : CleanupPrompt;
@@ -214,21 +234,42 @@ public sealed class SettingsViewModel : ObservableObject
         }
 
         _applyTheme(_s.Theme);
-        var failures = _applyHotkeys(_s.HotkeyToggle, _s.HotkeySmartBypass).Where(r => !r.Success).ToList();
-        if (failures.Count > 0)
+        var results = _applyHotkeys(_s.HotkeyToggle, _s.HotkeySmartBypass);
+        ShowHotkeyResults(results);
+        if (results.Any(r => !r.Success))
         {
-            SetHotkeyStatus(string.Join("\n", failures.Select(f => f.Error)), error: true);
-            SaveStatus = "Saved, but a shortcut couldn't be registered. Choose another on the General tab.";
+            SaveStatus = "Saved, but a shortcut is taken by Windows or another app. Record a different one or clear it (General tab).";
             return;
         }
 
         CloseRequested?.Invoke();
     }
 
-    private void SetHotkeyStatus(string? text, bool error)
+    private const string InvalidShortcut =
+        "Not a valid shortcut. Use at least one of Ctrl, Alt, Shift or Win plus a key (e.g. Ctrl+Alt+D), or leave it empty.";
+
+    private void ShowHotkeyResults(IReadOnlyList<HotkeyRegistration> results)
     {
-        HotkeyStatus = text;
-        HotkeyStatusIsError = error;
+        foreach (var r in results)
+        {
+            if (r.IsDisabled) SetStatus(r.Action, "Off. Use the popup's microphone button instead.", error: false);
+            else if (r.Success) SetStatus(r.Action, "✓ Active", error: false);
+            else SetStatus(r.Action, "✗ " + r.Error, error: true);
+        }
+    }
+
+    private void SetStatus(HotkeyAction action, string text, bool error)
+    {
+        if (action == HotkeyAction.ToggleDefault)
+        {
+            ToggleStatus = text;
+            ToggleStatusIsError = error;
+        }
+        else
+        {
+            BypassStatus = text;
+            BypassStatusIsError = error;
+        }
     }
 
     private void RefreshApiKeyStatus()

@@ -7,7 +7,11 @@ namespace Rambler.Services;
 
 public enum HotkeyAction { ToggleDefault = 1, ToggleSmartBypass = 2 }
 
-public sealed record HotkeyRegistration(HotkeyAction Action, string Gesture, bool Success, string? Error);
+public sealed record HotkeyRegistration(HotkeyAction Action, string Gesture, bool Success, string? Error)
+{
+    /// <summary>No shortcut configured (allowed: dictation can be started from the popup).</summary>
+    public bool IsDisabled => Success && Gesture.Length == 0;
+}
 
 /// <summary>
 /// System-wide hotkeys via Win32 RegisterHotKey on a hidden message-only window.
@@ -34,7 +38,10 @@ public sealed class HotkeyService : IDisposable
 
     public nint Handle => _source.Handle;
 
-    /// <summary>Registers both hotkeys, reporting conflicts with Windows or other applications.</summary>
+    /// <summary>
+    /// Registers both hotkeys, reporting conflicts with Windows or other applications.
+    /// An empty shortcut is disabled and simply not registered.
+    /// </summary>
     public IReadOnlyList<HotkeyRegistration> Apply(string toggle, string bypass)
     {
         UnregisterAll();
@@ -68,6 +75,8 @@ public sealed class HotkeyService : IDisposable
 
     private HotkeyRegistration Register(HotkeyAction action, string text, HotkeyGesture gesture)
     {
+        if (string.IsNullOrWhiteSpace(text))
+            return new HotkeyRegistration(action, string.Empty, true, null);
         if (!gesture.IsValid)
             return new HotkeyRegistration(action, text, false, "Not a valid shortcut.");
 
@@ -79,7 +88,7 @@ public sealed class HotkeyService : IDisposable
 
         var error = Marshal.GetLastWin32Error();
         var message = error == ERROR_HOTKEY_ALREADY_REGISTERED
-            ? $"{gesture} is already used by Windows or another app. Choose a different shortcut."
+            ? $"{gesture} is already used by Windows or another app. Record a different shortcut, or clear it."
             : $"Couldn't register {gesture} (error {error}).";
         return new HotkeyRegistration(action, gesture.ToString(), false, message);
     }

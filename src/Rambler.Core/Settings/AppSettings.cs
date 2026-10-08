@@ -29,7 +29,9 @@ public sealed class AppSettings
     // General
     public bool StartWithWindows { get; set; }
     public DictationMode DefaultMode { get; set; } = DictationMode.PromptCleanup;
+    /// <summary>Main shortcut; empty disables it.</summary>
     public string HotkeyToggle { get; set; } = "Ctrl+Win+Space";
+    /// <summary>Smart Only bypass shortcut; empty disables it.</summary>
     public string HotkeySmartBypass { get; set; } = "Ctrl+Win+Shift+Space";
     public ThemePreference Theme { get; set; } = ThemePreference.System;
     public bool PlaySounds { get; set; }
@@ -75,8 +77,9 @@ public sealed class AppSettings
         if (string.IsNullOrWhiteSpace(LiveModel)) LiveModel = DefaultLiveModel;
         if (string.IsNullOrWhiteSpace(RecordedModel)) RecordedModel = DefaultRecordedModel;
         if (string.IsNullOrWhiteSpace(CleanupModel)) CleanupModel = DefaultCleanupModel;
-        if (string.IsNullOrWhiteSpace(HotkeyToggle)) HotkeyToggle = "Ctrl+Win+Space";
-        if (string.IsNullOrWhiteSpace(HotkeySmartBypass)) HotkeySmartBypass = "Ctrl+Win+Shift+Space";
+        // Empty shortcut = disabled (the user can always dictate from the popup button).
+        HotkeyToggle = HotkeyToggle?.Trim() ?? string.Empty;
+        HotkeySmartBypass = HotkeySmartBypass?.Trim() ?? string.Empty;
         LanguageCode = LanguageCode?.Trim() ?? string.Empty;
         CleanupThinkingLevel = (CleanupThinkingLevel ?? string.Empty).Trim().ToUpperInvariant();
         CustomVocabulary = (CustomVocabulary ?? [])

@@ -52,6 +52,28 @@ public sealed class SettingsServiceTests : IDisposable
     }
 
     [Fact]
+    public void Empty_shortcut_means_disabled_and_survives_reload()
+    {
+        var service = new SettingsService(FilePath);
+        var s = service.Current;
+        s.HotkeySmartBypass = "";
+        service.Save(s);
+        var reloaded = new SettingsService(FilePath).Current;
+        Assert.Equal("", reloaded.HotkeySmartBypass);
+        Assert.Equal("Ctrl+Win+Space", reloaded.HotkeyToggle);
+    }
+
+    [Fact]
+    public void Shortcuts_missing_from_an_older_file_get_defaults()
+    {
+        Directory.CreateDirectory(_dir);
+        File.WriteAllText(FilePath, """{"theme":"Dark"}""");
+        var s = new SettingsService(FilePath).Current;
+        Assert.Equal("Ctrl+Win+Space", s.HotkeyToggle);
+        Assert.Equal("Ctrl+Win+Shift+Space", s.HotkeySmartBypass);
+    }
+
+    [Fact]
     public void Prompt_equal_to_default_is_stored_as_default()
     {
         var service = new SettingsService(FilePath);

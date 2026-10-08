@@ -27,7 +27,7 @@ Requirements: Windows 10 (1809+) or Windows 11, x64, a microphone, and a Gemini 
 
 - **Dictate:** put the cursor where you want text, press `Ctrl+Win+Space`, talk, press it again. Rambler transcribes, cleans up (in Prompt Cleanup mode), and inserts the text into the window you started in.
 - **Tray icon:** blue = ready, **red = microphone on**, amber = working, grey `!` = needs attention.
-- **Left-click the tray icon** for the popup: mode switch, start/stop button, live preview, input level, and hotkey reminders. Click anywhere else to dismiss it. Dictation keeps running.
+- **Left-click the tray icon** for the popup, which opens right at the icon: mode switch, start/stop button, live preview, input level, and hotkey reminders. Click anywhere else to dismiss it. Dictation keeps running.
 - **Right-click the tray icon** for Settings, Restart and Exit.
 - **Cancel:** the ✕ button in the popup discards the current dictation. Nothing is inserted.
 - **Pauses are fine.** Rambler never finalizes a thought because you paused. The utterance ends only when you stop, or optionally after a long silence (Settings › Audio).
@@ -40,7 +40,7 @@ Requirements: Windows 10 (1809+) or Windows 11, x64, a microphone, and a Gemini 
 
 | Tab | What you can change |
 |---|---|
-| General | Start with Windows, default mode, both shortcuts (with conflict warnings), insertion method (auto / type / paste), clipboard restore, theme (system / light / dark), start/stop sounds |
+| General | Start with Windows, default mode, both shortcuts (**Record** button, optional: clear one to turn it off, with per-shortcut conflict status), insertion method (auto / type / paste), clipboard restore, theme (system / light / dark), start/stop sounds |
 | Audio | Microphone, live input level, 4-second record-and-playback test, auto-stop after silence (off by default), maximum dictation length |
 | Gemini | API key (Credential Manager), connection test, live and recorded-audio models, recorded-audio fallback, language (empty = auto-detect), custom vocabulary, last error |
 | Cleanup | Cleanup model, thinking level, **technical refinement** (default 35%), editable system prompt with **Restore default** |
@@ -198,7 +198,7 @@ tests/                       Unit tests and optional live integration tests
 
 ## Troubleshooting
 
-- **"Shortcut conflict" at startup:** Windows or another app already owns the shortcut. Windows uses `Ctrl+Win+Space` to switch back to the previous keyboard input method, so if you use several input languages, pick another shortcut in Settings › General (e.g. `Ctrl+Alt+Space`).
+- **"Shortcut conflict" at startup:** Windows or another app already owns the shortcut. Windows uses `Ctrl+Win+Space` to switch back to the previous keyboard input method, so if you use several input languages, go to Settings › General, click **Record** and press another combination (e.g. `Ctrl+Alt+Space`), or **Clear** it and use the popup's microphone button. Each shortcut shows whether it's active. Note that shortcuts Windows grabs first, such as `Win+Space`, can't be recorded at all.
 - **Text went to the clipboard instead of being typed:** the target app runs as administrator (Windows blocks typing into elevated apps from normal apps), or focus moved. Press `Ctrl+V`.
 - **Microphone access is blocked:** Windows Settings › Privacy & security › Microphone › enable *Let desktop apps access your microphone*.
 - **Live preview unavailable:** the live model couldn't be reached. With fallback on, Rambler keeps recording and transcribes the audio when you stop. Settings › Gemini › **Test connection** shows which step fails.

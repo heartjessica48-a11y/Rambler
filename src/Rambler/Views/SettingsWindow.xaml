@@ -45,18 +45,19 @@
                         <ComboBox ItemsSource="{Binding Modes}" SelectedItem="{Binding SelectedMode}" Width="260" HorizontalAlignment="Left" />
 
                         <TextBlock Style="{StaticResource Label}" Text="Start / stop dictation (selected mode)" />
-                        <TextBox x:Name="HotkeyToggleBox" Text="{Binding HotkeyToggle, UpdateSourceTrigger=PropertyChanged}"
-                                 Width="260" HorizontalAlignment="Left" />
-                        <TextBlock Style="{StaticResource Label}" Text="Start / stop dictation (Smart Only bypass)" />
-                        <TextBox x:Name="HotkeyBypassBox" Text="{Binding HotkeyBypass, UpdateSourceTrigger=PropertyChanged}"
-                                 Width="260" HorizontalAlignment="Left" />
-                        <TextBlock Style="{StaticResource Hint}"
-                                   Text="Click a box and press the new shortcut, or type it (e.g. Ctrl+Alt+D). The bypass uses Smart Only for that dictation without changing your default mode." />
-                        <TextBlock Text="{Binding HotkeyStatus}" TextWrapping="Wrap" Margin="0,4,0,0">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBox x:Name="HotkeyToggleBox" Text="{Binding HotkeyToggle, UpdateSourceTrigger=PropertyChanged}" Width="240"
+                                     VerticalContentAlignment="Center" />
+                            <Button x:Name="RecordToggleButton" Content="Record" Click="OnRecordClick" Tag="{Binding ElementName=HotkeyToggleBox}"
+                                    Margin="8,0,0,0" Padding="12,4" MinWidth="80" ToolTip="Press the keys you want to use" />
+                            <Button Content="Clear" Click="OnClearClick" Tag="{Binding ElementName=HotkeyToggleBox}"
+                                    Margin="6,0,0,0" Padding="12,4" ToolTip="Turn this shortcut off" />
+                        </StackPanel>
+                        <TextBlock Text="{Binding ToggleStatus}" Margin="0,4,0,0">
                             <TextBlock.Style>
                                 <Style TargetType="TextBlock" BasedOn="{StaticResource Hint}">
                                     <Style.Triggers>
-                                        <DataTrigger Binding="{Binding HotkeyStatusIsError}" Value="True">
+                                        <DataTrigger Binding="{Binding ToggleStatusIsError}" Value="True">
                                             <Setter Property="Foreground" Value="{DynamicResource Rambler.Danger}" />
                                             <Setter Property="Opacity" Value="1" />
                                         </DataTrigger>
@@ -64,6 +65,29 @@
                                 </Style>
                             </TextBlock.Style>
                         </TextBlock>
+                        <TextBlock Style="{StaticResource Label}" Text="Start / stop dictation (Smart Only bypass)" />
+                        <StackPanel Orientation="Horizontal">
+                            <TextBox x:Name="HotkeyBypassBox" Text="{Binding HotkeyBypass, UpdateSourceTrigger=PropertyChanged}" Width="240"
+                                     VerticalContentAlignment="Center" />
+                            <Button x:Name="RecordBypassButton" Content="Record" Click="OnRecordClick" Tag="{Binding ElementName=HotkeyBypassBox}"
+                                    Margin="8,0,0,0" Padding="12,4" MinWidth="80" ToolTip="Press the keys you want to use" />
+                            <Button Content="Clear" Click="OnClearClick" Tag="{Binding ElementName=HotkeyBypassBox}"
+                                    Margin="6,0,0,0" Padding="12,4" ToolTip="Turn this shortcut off" />
+                        </StackPanel>
+                        <TextBlock Text="{Binding BypassStatus}" Margin="0,4,0,0">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock" BasedOn="{StaticResource Hint}">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding BypassStatusIsError}" Value="True">
+                                            <Setter Property="Foreground" Value="{DynamicResource Rambler.Danger}" />
+                                            <Setter Property="Opacity" Value="1" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                        <TextBlock Style="{StaticResource Hint}" Margin="0,8,0,6"
+                                   Text="Click Record, then press the keys (Esc cancels). Both shortcuts are optional: clear one to turn it off. The bypass uses Smart Only for that dictation without changing your default mode." />
 
                         <TextBlock Style="{StaticResource SectionHeader}" Text="Text insertion" />
                         <ComboBox ItemsSource="{Binding InsertionMethods}" SelectedItem="{Binding SelectedInsertionMethod}" />

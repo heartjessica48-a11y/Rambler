@@ -114,8 +114,18 @@ public sealed class PopupViewModel : ObservableObject
     public bool MessageIsError { get => _messageIsError; private set => Set(ref _messageIsError, value); }
     public bool HasPending { get => _hasPending; private set => Set(ref _hasPending, value); }
     public bool HasLastResult { get => _hasLastResult; private set => Set(ref _hasLastResult, value); }
-    public string HotkeyText { get => _hotkeyText; private set => Set(ref _hotkeyText, value); }
-    public string BypassHotkeyText { get => _bypassHotkeyText; private set => Set(ref _bypassHotkeyText, value); }
+    public string HotkeyText
+    {
+        get => _hotkeyText;
+        private set { if (Set(ref _hotkeyText, value)) OnPropertyChanged(nameof(HasHotkey)); }
+    }
+    public string BypassHotkeyText
+    {
+        get => _bypassHotkeyText;
+        private set { if (Set(ref _bypassHotkeyText, value)) OnPropertyChanged(nameof(HasBypassHotkey)); }
+    }
+    public bool HasHotkey => HotkeyText.Length > 0;
+    public bool HasBypassHotkey => BypassHotkeyText.Length > 0;
     public string TargetText { get => _targetText; private set => Set(ref _targetText, value); }
     public bool NeedsApiKey { get => _needsApiKey; private set => Set(ref _needsApiKey, value); }
 

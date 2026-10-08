@@ -143,10 +143,12 @@
             <!-- Footer: hotkeys -->
             <Grid Margin="0,12,0,0">
                 <StackPanel VerticalAlignment="Center">
-                    <TextBlock FontSize="11" Foreground="{DynamicResource Rambler.SubtleText}">
+                    <TextBlock FontSize="11" Foreground="{DynamicResource Rambler.SubtleText}"
+                               Visibility="{Binding HasHotkey, Converter={StaticResource BoolToVisibility}}">
                         <Run Text="{Binding HotkeyText, Mode=OneWay}" FontWeight="SemiBold" /><Run Text="  dictate" />
                     </TextBlock>
-                    <TextBlock FontSize="11" Foreground="{DynamicResource Rambler.SubtleText}" Margin="0,2,0,0">
+                    <TextBlock FontSize="11" Foreground="{DynamicResource Rambler.SubtleText}" Margin="0,2,0,0"
+                               Visibility="{Binding HasBypassHotkey, Converter={StaticResource BoolToVisibility}}">
                         <Run Text="{Binding BypassHotkeyText, Mode=OneWay}" FontWeight="SemiBold" /><Run Text="  Smart Only" />
                     </TextBlock>
                 </StackPanel>

@@ -38,11 +38,12 @@ public sealed class TrayService : IDisposable
         };
         _icon.MouseClick += (_, e) =>
         {
-            if (e.Button == Forms.MouseButtons.Left) LeftClicked?.Invoke();
+            if (e.Button == Forms.MouseButtons.Left) LeftClicked?.Invoke(Forms.Cursor.Position);
         };
     }
 
-    public event Action? LeftClicked;
+    /// <summary>Left click on the icon, with the cursor position in physical screen pixels.</summary>
+    public event Action<Point>? LeftClicked;
     public event Action? SettingsRequested;
     public event Action? RestartRequested;
     public event Action? ExitRequested;

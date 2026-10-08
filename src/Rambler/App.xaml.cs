@@ -34,6 +34,7 @@ public partial class App : Application
     private ThemeService _theme = null!;
     private TrayService? _tray;
     private HotkeyService? _hotkeys;
+    private IReadOnlyList<HotkeyRegistration> _hotkeyResults = [];
     private WasapiAudioSource? _audio;
     private TextInsertionService? _inserter;
     private DictationCoordinator? _coordinator;
@@ -97,7 +98,7 @@ public partial class App : Application
 
         System.Windows.Forms.Application.EnableVisualStyles();
         _tray = new TrayService();
-        _tray.LeftClicked += () => _popup.Toggle();
+        _tray.LeftClicked += position => _popup.Toggle(position);
         _tray.SettingsRequested += () => OpenSettings(false);
         _tray.RestartRequested += Restart;
         _tray.ExitRequested += () => ExitApp();
@@ -127,6 +128,7 @@ public partial class App : Application
     private IReadOnlyList<HotkeyRegistration> ApplyHotkeys(string toggle, string bypass, bool notify)
     {
         var results = _hotkeys!.Apply(toggle, bypass);
+        _hotkeyResults = results;
         var failed = results.Where(r => !r.Success).ToList();
         if (notify && failed.Count > 0)
             _tray?.ShowNotification("Shortcut conflict: " + failed[0].Error + " Change it in Settings.", isError: true);
@@ -178,7 +180,7 @@ public partial class App : Application
         var viewModel = new SettingsViewModel(_settings, _credentials,
             new GeminiConnectionTester(_gemini, new ClientWebSocketFactory()),
             (toggle, bypass) => ApplyHotkeys(toggle, bypass, notify: false),
-            _theme.Apply, _lastError, Dispatcher);
+            _theme.Apply, _hotkeyResults, _lastError, Dispatcher);
 
         _settingsWindow = new SettingsWindow(viewModel, () => _hotkeys?.Suspend(), () => _hotkeys?.Resume(), focusGemini);
         _settingsWindow.Closed += (_, _) =>
