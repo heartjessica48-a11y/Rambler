@@ -16,7 +16,7 @@ Native .NET 10 + WPF. No Electron, no Python, no browser engine, no background s
 
 ## Install
 
-1. Download or build `Rambler.exe` (self-contained, x64, no .NET install needed). See [Build](#build-from-source).
+1. Download `Rambler-<version>-win-x64.exe` from the [Releases](https://github.com/heartjessica48-a11y/Rambler/releases) page (self-contained, x64, no .NET install needed), or [build it yourself](#build-from-source).
 2. Run it. It's unsigned, so Windows SmartScreen may ask you to confirm (**More info → Run anyway**).
 3. Rambler appears in the system tray (you may need to drag it out of the `^` overflow area).
 4. On first run, Settings opens on the **Gemini** tab. Paste your API key from [Google AI Studio](https://aistudio.google.com/apikey), click **Test connection**, then **Save**.
@@ -143,6 +143,16 @@ For a small (~1 MB) build that relies on the installed [.NET 10 Desktop Runtime]
 ```powershell
 dotnet publish src/Rambler/Rambler.csproj -c Release -r win-x64 -p:SelfContained=false -p:EnableCompressionInSingleFile=false -o artifacts/publish/win-x64-framework-dependent
 ``` Open `Rambler.sln` in Visual Studio 2026 (or any IDE with .NET 10 support, such as Rider) to work on it.
+
+### Releases
+
+`.github/workflows/release.yml` builds on a Windows runner, runs the unit tests, and publishes a GitHub Release with both executables and `SHA256SUMS.txt`. To cut one:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+Or run the **Release** workflow manually from the Actions tab and enter a tag. Tag pushes are marked as pre-releases; promote one to a full release on GitHub when you're happy with it.
 
 ### Tests
 

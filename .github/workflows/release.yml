@@ -1,0 +1,87 @@
+name: Release
+
+# Builds Rambler on Windows, runs the unit tests, and publishes a GitHub Release
+# with the executables attached. Trigger by pushing a tag like v0.1.0, or run manually.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create (e.g. v0.1.0)'
+        required: true
+      prerelease:
+        description: 'Mark as pre-release'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Version from tag
+        shell: pwsh
+        run: |
+          $version = $env:TAG.TrimStart('v')
+          if ($version -notmatch '^\d+\.\d+\.\d+') { throw "Tag '$env:TAG' is not a version like v1.2.3" }
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Build
+        run: dotnet build Rambler.sln -c Release -p:Version=${{ env.VERSION }}
+
+      - name: Unit tests
+        run: dotnet test tests/Rambler.Core.Tests -c Release --no-build
+
+      - name: Publish self-contained
+        run: dotnet publish src/Rambler/Rambler.csproj -c Release -r win-x64 --self-contained true -p:Version=${{ env.VERSION }} -o out/self-contained
+
+      - name: Publish framework-dependent
+        run: dotnet publish src/Rambler/Rambler.csproj -c Release -r win-x64 -p:SelfContained=false -p:EnableCompressionInSingleFile=false -p:Version=${{ env.VERSION }} -o out/framework-dependent
+
+      - name: Collect assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item out/self-contained/Rambler.exe "dist/Rambler-$env:VERSION-win-x64.exe"
+          Copy-Item out/framework-dependent/Rambler.exe "dist/Rambler-$env:VERSION-win-x64-framework-dependent.exe"
+          Get-ChildItem dist/*.exe | ForEach-Object {
+            "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content dist/SHA256SUMS.txt
+          Get-Content dist/SHA256SUMS.txt
+
+      - name: Create release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ github.event_name == 'push' || github.event.inputs.prerelease == 'true' }}
+        run: |
+          $notes = @"
+          ## Downloads
+
+          | File | Notes |
+          |---|---|
+          | ``Rambler-$env:VERSION-win-x64.exe`` | **Recommended.** Self-contained, no .NET install needed. |
+          | ``Rambler-$env:VERSION-win-x64-framework-dependent.exe`` | Small; requires the [.NET 10 Desktop Runtime (x64)](https://dotnet.microsoft.com/download/dotnet/10.0). |
+
+          Windows 10 (1809+) / 11, x64. The executables are unsigned, so SmartScreen may ask you to confirm (**More info → Run anyway**).
+          On first run, Settings opens on the Gemini tab: paste your API key from Google AI Studio and click **Test connection**.
+          Checksums are in ``SHA256SUMS.txt``.
+          "@
+          $assets = (Get-ChildItem dist -File).FullName
+          $ghArgs = @($env:TAG) + $assets + @('--title', "Rambler $env:VERSION", '--notes', $notes, '--generate-notes', '--target', $env:GITHUB_SHA)
+          if ($env:PRERELEASE -eq 'true') { $ghArgs += '--prerelease' }
+          gh release create @ghArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
