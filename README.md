@@ -136,7 +136,13 @@ dotnet test tests/Rambler.Core.Tests -c Release
 dotnet publish src/Rambler/Rambler.csproj -c Release -r win-x64 --self-contained true -o artifacts/publish/win-x64
 ```
 
-The output is a single self-contained `artifacts/publish/win-x64/Rambler.exe` (about 66 MB, including the .NET and WPF runtimes). Open `Rambler.sln` in Visual Studio 2026 (or any IDE with .NET 10 support, such as Rider) to work on it.
+The output is a single self-contained `artifacts/publish/win-x64/Rambler.exe` (about 66 MB, including the .NET and WPF runtimes).
+
+For a small (~1 MB) build that relies on the installed [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) instead:
+
+```powershell
+dotnet publish src/Rambler/Rambler.csproj -c Release -r win-x64 -p:SelfContained=false -p:EnableCompressionInSingleFile=false -o artifacts/publish/win-x64-framework-dependent
+``` Open `Rambler.sln` in Visual Studio 2026 (or any IDE with .NET 10 support, such as Rider) to work on it.
 
 ### Tests
 
