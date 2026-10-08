@@ -16,11 +16,12 @@
         </Border.Effect>
 
         <StackPanel>
-            <!-- Header: status dot, title, status, settings -->
-            <Grid>
+            <!-- Header: status dot, title, status, pin, settings. Drag it to move a pinned panel. -->
+            <Grid x:Name="Header" Background="Transparent">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
@@ -45,7 +46,22 @@
                 <TextBlock Grid.Column="1" Text="Rambler" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />
                 <TextBlock Grid.Column="2" Text="{Binding StatusText}" FontSize="12" Margin="8,0"
                            Foreground="{DynamicResource Rambler.SubtleText}" VerticalAlignment="Center" />
-                <Button Grid.Column="3" Style="{StaticResource Rambler.IconButton}" Content="&#xE713;"
+                <Button Grid.Column="3" Command="{Binding TogglePinCommand}" AutomationProperties.Name="Pin panel">
+                    <Button.Style>
+                        <Style TargetType="Button" BasedOn="{StaticResource Rambler.IconButton}">
+                            <Setter Property="Content" Value="&#xE718;" />
+                            <Setter Property="ToolTip" Value="Pin: keep this panel open without taking focus from your app" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsPinned}" Value="True">
+                                    <Setter Property="Content" Value="&#xE840;" />
+                                    <Setter Property="Foreground" Value="{DynamicResource Rambler.Accent}" />
+                                    <Setter Property="ToolTip" Value="Unpin: close the panel when you click elsewhere" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Button.Style>
+                </Button>
+                <Button Grid.Column="4" Style="{StaticResource Rambler.IconButton}" Content="&#xE713;"
                         Command="{Binding OpenSettingsCommand}" ToolTip="Settings" AutomationProperties.Name="Settings" />
             </Grid>
 

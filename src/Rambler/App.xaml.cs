@@ -110,6 +110,7 @@ public partial class App : Application
         ApplyHotkeys(_settings.Current.HotkeyToggle, _settings.Current.HotkeySmartBypass, notify: true);
 
         if (_settings.LoadWarning is { } warning) _tray.ShowNotification(warning, isError: true);
+        if (_settings.Current.PopupPinned) _popup.ShowNearTray(); // restore the pinned panel
         if (!_hasApiKey)
         {
             // First run: ask for the key. When launched at sign-in, don't pop a window; just leave a hint.
@@ -167,7 +168,8 @@ public partial class App : Application
     private Task HidePopupAsync() =>
         Dispatcher.InvokeAsync(() =>
         {
-            if (_popup is { IsVisible: true }) _popup.Hide();
+            // A pinned panel never has focus, so it never needs to get out of the way.
+            if (_popup is { IsVisible: true, IsPinned: false }) _popup.Hide();
         }).Task;
 
     // ---- Settings -----------------------------------------------------------------------------
@@ -180,7 +182,7 @@ public partial class App : Application
             return;
         }
 
-        _popup?.Hide();
+        if (_popup is { IsPinned: false }) _popup.Hide();
         var viewModel = new SettingsViewModel(_settings, _credentials,
             new GeminiConnectionTester(_gemini, new ClientWebSocketFactory()),
             (toggle, bypass) => ApplyHotkeys(toggle, bypass, notify: false),

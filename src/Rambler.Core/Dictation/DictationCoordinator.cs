@@ -75,8 +75,8 @@ public sealed class DictationCoordinator : IAsyncDisposable
 
     public string TargetDescription => _target.Description;
 
-    /// <summary>The control captured for this dictation (app name, editable or not).</summary>
-    public InsertionTarget Target => _target;
+    /// <summary>Where text goes: the field captured at start, or (follow-focus) the field currently in use.</summary>
+    public InsertionTarget Target => _output?.CurrentTarget ?? _target;
 
     /// <summary>Progressive insertion status while text is being inserted as you speak; null otherwise.</summary>
     public OutputStatus? OutputState => _output?.Status;
@@ -135,7 +135,8 @@ public sealed class DictationCoordinator : IAsyncDisposable
             ProgressiveOutput? output = null;
             if (progressive)
             {
-                output = new ProgressiveOutput(ActiveMode.Value, _target, _inserter, _cleanup, BuildCleanupOptions(settings), _key);
+                output = new ProgressiveOutput(ActiveMode.Value, _target, _inserter, _cleanup, BuildCleanupOptions(settings), _key,
+                    new ProgressiveOutputOptions { FollowFocus = settings.FollowFocus });
                 output.Changed += () => { if (SessionId == sessionId) RaiseChanged(); };
                 // Committed text flows to the output only for this dictation; a later one never consumes it.
                 session.Committed += segment => { if (SessionId == sessionId) output.Add(segment); };
@@ -453,6 +454,11 @@ public sealed class DictationCoordinator : IAsyncDisposable
     private async Task InsertAsync(string output, CancellationToken ct, string? warning = null)
     {
         if (!TryTransition(DictationState.Inserting)) return;
+        if (_snapshot.FollowFocus)
+        {
+            var current = _inserter.CaptureTarget(); // where the user is now (Rambler's popup is skipped)
+            if (current.CanReceiveText) _target = current;
+        }
         RaiseChanged();
 
         InsertionResult result;

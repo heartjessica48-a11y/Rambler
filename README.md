@@ -29,13 +29,14 @@ Requirements: Windows 10 (1809+) or Windows 11, x64, a microphone, and a Gemini 
 
 ## Use
 
-- **Dictate:** put the cursor where you want text, press your shortcut (or click the microphone in the popup) and talk. Text appears in that app **while you speak**: each finished phrase (Smart Only) or each finished thought (Prompt Cleanup) is inserted as soon as it's stable. Press the shortcut (or the button) again to stop; the last words are flushed then. Prefer one insert at the end? Settings › General › **When I finish**.
-- **Tray icon:** blue = ready, **red = microphone on**, amber = working, grey `!` = needs attention.
-- **Left-click the tray icon** for the popup, which opens right at the icon: mode switch, start/stop button, live preview, input level, and hotkey reminders. Click anywhere else to dismiss it. Dictation keeps running.
+- **Dictate:** click into any text field (Notepad, Word, a browser, Discord, …), press your shortcut (or click the microphone in the popup) and talk. Text is typed or pasted into that field **while you speak**: each finished phrase (Smart Only) or each finished thought (Prompt Cleanup) is inserted as soon as it's stable. Press the shortcut (or the button) again to stop; the last words are flushed then. Prefer one insert at the end? Settings › General › **When I finish**.
+- **Tray icon:** a plain microphone in your taskbar's own colour (black or white, following the Windows light/dark setting) when ready, **red = microphone on**, amber = working, grey `!` = needs attention.
+- **Left-click the tray icon** for the popup, which opens right at the icon: mode switch, start/stop button, live preview, input level, and hotkey reminders. Click anywhere else to dismiss it. Dictation keeps running. The popup uses your Windows accent colour and light/dark mode.
+- **Pin the popup** (pin button in its header) to keep it open as a small floating panel. A pinned panel never takes keyboard focus: click its microphone button and your text field keeps the caret, so the words land there. Drag the header to move it; the pin is remembered across restarts. Unpin to go back to the tray popup.
 - **Right-click the tray icon** for Settings, Restart and Exit.
 - **Cancel:** the ✕ button in the popup discards the current dictation. Nothing is inserted.
 - **Pauses are fine.** A thinking pause never ends dictation, and a pause alone never ends a thought that trails off ("…and", "so,"). Recording stops only when you stop it, or optionally after a long silence (Settings › Audio).
-- **Switching apps is safe.** If you click into another app while dictating, Rambler keeps listening but **pauses insertion** (status: *Waiting for target*). Click back into the same text field and it continues. Nothing is ever typed into a different window or field.
+- **Text follows you.** By default (Settings › General › Insert into: **Wherever I'm typing**) each piece goes into the text field you're in at that moment, so you can start dictating from the popup or switch apps mid-dictation. When nothing editable has focus (the desktop, the taskbar, a file list, Rambler's own popup) insertion **waits** (status: *Waiting for target*) until you click into a text field. Prefer the stricter behaviour? Choose **Only where I started**: insertion then pauses whenever you leave the original field and resumes when you return.
 - **Say "new line" or "new paragraph"** to break lines. In Prompt Cleanup, "next point" and "make that a list" also work, and the model formats lists and paragraphs on its own when the content clearly calls for it.
 - **If something fails, your words aren't lost:**
   - If cleanup fails, insertion stops and the popup offers **Insert** (the SMART transcript from that point) or **Copy**.
@@ -46,11 +47,15 @@ Requirements: Windows 10 (1809+) or Windows 11, x64, a microphone, and a Gemini 
 
 | Tab | What you can change |
 |---|---|
-| General | Start with Windows, default mode, both shortcuts (**Record** button, optional: clear one to turn it off, with per-shortcut conflict status), **when to insert** (as I speak / when I finish), insertion method (auto / type / paste), clipboard restore, theme (system / light / dark), start/stop sounds |
+| General | Default mode, **insert text** (as I speak / when I finish), **insert into** (wherever I'm typing / only where I started), both shortcuts (**Record** button, optional: clear one to turn it off, with per-shortcut conflict status), insertion method (auto / type / paste), clipboard restore, theme (system / light / dark), start/stop sounds, start with Windows |
 | Audio | Microphone, live input level, 4-second record-and-playback test, auto-stop after silence (off by default), maximum dictation length |
 | Gemini | API key (Credential Manager), connection test, live and recorded-audio models, recorded-audio fallback, language (empty = auto-detect), custom vocabulary, last error |
 | Cleanup | Cleanup model, thinking level, **technical refinement** (default 35%), editable system prompt with **Restore default**, and a read-only view of the rules Rambler always appends |
 | Privacy | What is sent to Google and what stays local |
+
+The window uses a compact label/value layout meant to fit each tab in one window (it's resizable), and settings have tooltips.
+
+Defaults are chosen so it works in other apps out of the box: Prompt Cleanup, insert **as I speak**, insert **wherever I'm typing**, **Auto** insertion (type single lines, paste multi-line text where Enter would send), restore clipboard on, sounds on, no shortcuts (record your own).
 
 Settings live in `%APPDATA%\Rambler\settings.json`. They contain no secrets.
 
@@ -94,13 +99,13 @@ Microphone ─► LiveTranscriptionSession ──WSS──► gemini-3.5-transcr
 
 **Cleanup context.** Each chunk is sent as `<transcript final="…">` together with up to about 1,200 characters of already-produced text as `<committed_context>`. The model edits only the chunk; the committed text is read-only. Chunks are processed one at a time, in order, so a slow response can never be inserted after a later chunk.
 
-**Focus safety.** At start Rambler captures:
+**Focus safety.** Rambler captures a target:
 
-- the foreground window (or, if the popup is in front, the window you were in before);
+- the foreground window (or, if the popup, the taskbar or another shell surface is in front, the app window you were in before; clicking the tray icon never makes the taskbar the target);
 - the focused control's handle (`GetGUIThreadInfo`);
 - its UI Automation identity (runtime id) and editability (control type / `ValuePattern`).
 
-Before every insert (and between typing batches) it checks that the same window is in front and the same control is focused. Browsers and Electron apps use one window for every field, which is why the UI Automation identity matters. If anything differs, insertion **waits**; it never forces another window to the front while you're dictating. The only exception is one return of focus when you stop from Rambler's own popup, done while the popup still owns the foreground, which fixes the old "couldn't switch back, copied instead" problem. Non-editable targets (the desktop, File Explorer's file list, buttons) receive nothing; the text is kept for you.
+With **Wherever I'm typing** (default) the target is re-captured before every piece, so text goes to the field that has focus right then; if that isn't editable, insertion waits. With **Only where I started**, before every insert (and between typing batches) it checks that the same window is in front and the same control is focused. Browsers and Electron apps use one window for every field, which is why the UI Automation identity matters. If anything differs, insertion **waits**; it never forces another window to the front while you're dictating. The only exception is one return of focus when you stop from Rambler's own popup, done while the popup still owns the foreground, which fixes the old "couldn't switch back, copied instead" problem. Non-editable targets (the desktop, File Explorer's file list, buttons) receive nothing; the text is kept for you.
 
 **Line breaks and Enter.** Rambler never presses a bare Enter for a line break, except in classic editors such as Notepad and WordPad where Enter is a line break. Elsewhere (browsers, Discord, Slack, Teams and other Electron or web apps), text containing line breaks is pasted. Pasting inserts the breaks without submitting the message. The clipboard is restored afterwards and the temporary text is kept out of clipboard history. Single-line text is typed directly with Unicode input and doesn't touch the clipboard. **Always type** in Settings uses Shift+Enter for line breaks instead.
 
@@ -193,7 +198,7 @@ Or run the **Release** workflow manually from the Actions tab and enter a tag. T
 
 ### Tests
 
-- `tests/Rambler.Core.Tests`: 207 deterministic unit tests. They need no API key or Windows. Coverage:
+- `tests/Rambler.Core.Tests`: 215 deterministic unit tests. They need no API key or Windows. Coverage:
   - the state machine and hotkey mode selection, including the Smart Only bypass
   - transcript accumulation and interim/final de-duplication
   - Live protocol messages
@@ -208,6 +213,7 @@ Or run the **Release** workflow manually from the Actions tab and enter a tag. T
     - thought chunking and ordered chunk cleanup with read-only context (including slow responses)
     - Smart Only bypass and spoken "new line" / "new paragraph"
     - focus loss (pause and resume), destroyed targets, partial typing without duplicates, and cleanup failure recovery
+    - follow-focus mode: text going to whichever field has focus, waiting while nothing editable is focused, and switching fields mid-dictation
     - empty chunks, stale events from a cancelled session, stop/restart races
     - preservation of a customized system prompt
 - `tests/Rambler.IntegrationTests`: optional live tests, skipped unless configured:
@@ -252,8 +258,8 @@ tests/                       Unit tests and optional live integration tests
 ## Troubleshooting
 
 - **"Shortcut conflict":** Windows or another app already owns the shortcut. For example, Windows uses `Ctrl+Win+Space` to switch back to the previous keyboard input method. Go to Settings › General, click **Record** and press another combination (e.g. `Ctrl+Alt+Space`), or **Clear** it and use the popup's microphone button. Each shortcut shows whether it's active. Note that shortcuts Windows grabs first, such as `Win+Space`, can't be recorded at all.
-- **Status says "Waiting for target":** you're in a different app or a different field than when you started. Click back into the original text field and insertion continues. Or stop, then use **Insert** (it goes where you were last typing) or **Copy**.
-- **"No editable target":** dictation started while the desktop, a file list or a button had focus. The text is kept; stop, click into a text field, open the popup and press **Insert**.
+- **Status says "Waiting for target":** nothing editable has focus (with **Only where I started**: you're in a different field than when you started). Click into a text field and insertion continues. Or stop, then use **Insert** (it goes where you were last typing) or **Copy**.
+- **"No editable text field was focused":** older versions could pick the taskbar as the target after a tray-icon click. Fixed in 0.3.0; if you still see it, click into a text field and press **Insert**, and check Settings › General › Insert into is **Wherever I'm typing**.
 - **Text went to the clipboard instead of being typed:** the target app runs as administrator (Windows blocks typing into elevated apps from normal apps). Press `Ctrl+V`.
 - **Microphone access is blocked:** Windows Settings › Privacy & security › Microphone › enable *Let desktop apps access your microphone*.
 - **Live preview unavailable:** the live model couldn't be reached. With fallback on, Rambler keeps recording and transcribes the audio when you stop. Settings › Gemini › **Test connection** shows which step fails.
@@ -264,14 +270,14 @@ tests/                       Unit tests and optional live integration tests
 What has been verified so far:
 
 - The solution builds in Release with zero warnings, and the self-contained `win-x64` single-file publish works. Both were run on Linux with the .NET 10.0.112 SDK, which bundles runtime 10.0.12.
-- All 207 unit tests pass, on Linux and on the Windows release runner. They ran repeatedly with no flakiness, and a deliberate code mutation was caught.
+- All 215 unit tests pass, on Linux and on the Windows release runner. They ran repeatedly with no flakiness, and a deliberate code mutation was caught.
 - The tray, popup and Settings windows of 0.1.x were confirmed running on Windows by the user.
 - The real Gemini endpoints were probed with a deliberately invalid key. Both `generateContent` and the Live `BidiGenerateContent` WebSocket accepted the request shape and header authentication, and returned `API key not valid`, which Rambler maps to its invalid-key error.
 
 **Not yet verified:**
 
 - No API key was available, so live transcription and cleanup have not run against real audio or text.
-- Progressive insertion (UI Automation focus tracking, paste-based line breaks) was compiled but has not been exercised against real apps. Behavior in Notepad, browser textareas, Discord and rich-text editors still needs hands-on testing.
+- Progressive insertion (UI Automation focus tracking, follow-focus targeting, paste-based line breaks), the pinned non-activating panel and the accent-coloured theme were compiled but have not been exercised against real apps. The new Settings layout hasn't been seen on screen yet either. Behavior in Notepad, browser textareas, Discord and rich-text editors still needs hands-on testing.
 
 To finish verification on a Windows PC:
 
@@ -283,5 +289,6 @@ To finish verification on a Windows PC:
 6. While dictating, click into another app. The status should show *Waiting for target* and nothing should be typed there. Click back and insertion should resume.
 7. Repeat with the bypass shortcut. SMART text should appear phrase by phrase with no cleanup, and the popup should still show **Prompt Cleanup** selected.
 8. Start dictation from the popup's button, then stop it from the popup. Text should go to the previous app, not the popup.
-9. Unplug the microphone while dictating. The recorded part should be finished and inserted, and the tray icon should no longer be red.
-10. Optionally run `./build.ps1 -LiveTests` with `GEMINI_API_KEY` and `RAMBLER_TEST_WAV` set.
+9. Pin the popup, click into Notepad, then click the pinned panel's microphone button. The caret should stay in Notepad and the text should appear there. Drag the panel by its header, restart Rambler, and check it comes back pinned.
+10. Unplug the microphone while dictating. The recorded part should be finished and inserted, and the tray icon should no longer be red.
+11. Optionally run `./build.ps1 -LiveTests` with `GEMINI_API_KEY` and `RAMBLER_TEST_WAV` set.

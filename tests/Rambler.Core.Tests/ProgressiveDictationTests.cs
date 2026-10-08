@@ -456,6 +456,115 @@ public class ProgressiveOutputTests
     }
 }
 
+public class FollowFocusTests
+{
+    private static readonly CleanupOptions s_cleanupOptions = new("m", null, 35, "", []);
+    private static CommittedSegment Seg(int i, string text) => new(i, text, TimeSpan.FromSeconds(3));
+    private static readonly InsertionTarget Notepad = new(1, 10, "Notepad") { AppName = "Notepad", Kind = TargetKind.Editable };
+    private static readonly InsertionTarget Discord = new(2, 20, "Discord") { AppName = "Discord", Kind = TargetKind.Editable };
+    private static readonly InsertionTarget Desktop = new(3, 30, "Desktop") { AppName = "Desktop", Kind = TargetKind.NotEditable };
+
+    private static ProgressiveOutput Create(FakeInserter inserter, InsertionTarget start) =>
+        new(DictationMode.SmartOnly, start, inserter, new FakeCleanup(), s_cleanupOptions, "key",
+            new ProgressiveOutputOptions { TickInterval = TimeSpan.Zero, TargetPollInterval = TimeSpan.FromMilliseconds(20), FollowFocus = true });
+
+    [Fact]
+    public async Task Text_follows_the_user_into_another_app()
+    {
+        var inserter = new FakeInserter { Target = Notepad };
+        await using var output = Create(inserter, Notepad);
+        output.Add(Seg(0, "In Notepad."));
+        await Wait.Until(() => inserter.Inserted.Count == 1);
+
+        inserter.Target = Discord; // the user switched apps
+        output.Add(Seg(1, "In Discord."));
+        await Wait.Until(() => inserter.Inserted.Count == 2);
+        await output.CompleteAsync(false, default);
+
+        Assert.Equal(Notepad, inserter.Inserted[0].Target);
+        Assert.Equal(Discord, inserter.Inserted[1].Target);
+        Assert.Equal(Discord, output.CurrentTarget);
+    }
+
+    [Fact]
+    public async Task Starting_without_a_text_field_waits_until_one_is_focused()
+    {
+        var inserter = new FakeInserter { Target = Desktop };
+        await using var output = Create(inserter, Desktop);
+        output.Add(Seg(0, "Hold this."));
+        await Wait.Until(() => output.Status == OutputStatus.WaitingForTarget);
+        Assert.Empty(inserter.Inserted);
+
+        inserter.Target = Notepad;
+        inserter.SetFocus(true);
+        await Wait.Until(() => inserter.Inserted.Count == 1);
+        Assert.Equal(Notepad, inserter.Inserted[0].Target);
+    }
+
+    [Fact]
+    public async Task An_app_that_refuses_text_pauses_insertion_instead_of_stopping_it()
+    {
+        var admin = new InsertionTarget(9, 90, "Admin terminal") { AppName = "Terminal", Kind = TargetKind.Editable };
+        var inserter = new FakeInserter { Target = admin };
+        inserter.Result = _ => inserter.Target == admin
+            ? new InsertionResult(InsertionOutcome.Failed, "runs as administrator")
+            : InsertionResult.Success;
+        await using var output = Create(inserter, admin);
+        output.Add(Seg(0, "Waits for a normal app."));
+        await Wait.Until(() => output.Status == OutputStatus.WaitingForTarget);
+
+        inserter.Target = Notepad;
+        inserter.SetFocus(true);
+        await Wait.Until(() => inserter.Inserted.Count == 1);
+        var result = await output.CompleteAsync(false, default);
+        Assert.Equal("Waits for a normal app.", result.InsertedText);
+        Assert.Null(result.Problem);
+    }
+
+    [Fact]
+    public async Task Rambler_settings_default_to_following_focus()
+    {
+        Assert.True(new AppSettings().FollowFocus);
+        var audio = new FakeAudioSource();
+        var sessions = new FakeSessionFactory { Next = () => new FakeTranscriptionSession { EmitResultOnComplete = false } };
+        var inserter = new FakeInserter { Target = Notepad };
+        var c = new DictationCoordinator(audio, sessions, new FakeCleanup(), inserter,
+            () => new AppSettings { DefaultMode = DictationMode.SmartOnly }, () => "AIzaTESTKEY0000000000000000000000000000");
+        c.Start(DictationTrigger.Default);
+        inserter.Target = Discord;
+        sessions.Sessions[0].RaiseCommitted(0, "Goes to Discord.");
+        await Wait.Until(() => inserter.Inserted.Count == 1);
+        Assert.Equal(Discord, inserter.Inserted[0].Target);
+        Assert.Equal("Discord", c.Target.DisplayName);
+        await c.StopAsync();
+    }
+
+    [Fact]
+    public async Task Insert_when_finished_goes_where_the_user_is_at_stop()
+    {
+        var inserter = new FakeInserter { Target = Notepad };
+        var c = new DictationCoordinator(new FakeAudioSource(), new FakeSessionFactory(), new FakeCleanup(), inserter,
+            () => new AppSettings { DefaultMode = DictationMode.SmartOnly, InsertWhenFinished = true },
+            () => "AIzaTESTKEY0000000000000000000000000000");
+        c.Start(DictationTrigger.Default);
+        inserter.Target = Discord;
+        await c.StopAsync();
+        Assert.Equal(Discord, Assert.Single(inserter.Inserted).Target);
+    }
+
+    [Fact]
+    public async Task Fixed_target_mode_still_never_follows_focus()
+    {
+        var inserter = new FakeInserter { Target = Notepad };
+        await using var output = new ProgressiveOutput(DictationMode.SmartOnly, Notepad, inserter, new FakeCleanup(), s_cleanupOptions, "key",
+            new ProgressiveOutputOptions { TickInterval = TimeSpan.Zero, TargetPollInterval = TimeSpan.FromMilliseconds(20), FollowFocus = false });
+        inserter.Target = Discord;
+        output.Add(Seg(0, "Only Notepad."));
+        await Wait.Until(() => inserter.Inserted.Count == 1);
+        Assert.Equal(Notepad, inserter.Inserted[0].Target);
+    }
+}
+
 public class EndpointingTests
 {
     private const string Key = "AIzaTESTKEY0000000000000000000000000000";

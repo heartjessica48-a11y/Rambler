@@ -120,16 +120,19 @@ public sealed class SettingsViewModel : ObservableObject
     public bool RestoreClipboard { get => _s.RestoreClipboard; set { _s.RestoreClipboard = value; OnPropertyChanged(); } }
 
     /// <summary>Default: text is inserted while you speak. The alternative buffers and inserts when you stop.</summary>
-    public bool InsertProgressively
+    public IReadOnlyList<Choice<bool>> InsertTimings { get; } = [new(false, "As I speak"), new(true, "When I finish")];
+    public Choice<bool> SelectedInsertTiming
     {
-        get => !_s.InsertWhenFinished;
-        set { _s.InsertWhenFinished = !value; OnPropertyChanged(); OnPropertyChanged(nameof(InsertWhenFinished)); }
+        get => InsertTimings.First(t => t.Value == _s.InsertWhenFinished);
+        set { _s.InsertWhenFinished = value.Value; OnPropertyChanged(); }
     }
 
-    public bool InsertWhenFinished
+    /// <summary>Default: text follows you into whatever app you're typing in.</summary>
+    public IReadOnlyList<Choice<bool>> TargetModes { get; } = [new(true, "Wherever I'm typing"), new(false, "Only where I started")];
+    public Choice<bool> SelectedTargetMode
     {
-        get => _s.InsertWhenFinished;
-        set { _s.InsertWhenFinished = value; OnPropertyChanged(); OnPropertyChanged(nameof(InsertProgressively)); }
+        get => TargetModes.First(t => t.Value == _s.FollowFocus);
+        set { _s.FollowFocus = value.Value; OnPropertyChanged(); }
     }
 
     /// <summary>Rambler's mandatory formatting/progressive instructions, appended after the editable prompt.</summary>

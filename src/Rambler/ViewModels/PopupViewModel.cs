@@ -104,6 +104,23 @@ public sealed class PopupViewModel : ObservableObject
         }
     }
 
+    /// <summary>Pinned: the panel stays open as a floating panel that never takes focus. Saved immediately.</summary>
+    public bool IsPinned
+    {
+        get => _settings.Current.PopupPinned;
+        set
+        {
+            var s = _settings.Current;
+            if (s.PopupPinned == value) return;
+            s.PopupPinned = value;
+            _settings.Save(s);
+            OnPropertyChanged();
+        }
+    }
+
+    public ICommand TogglePinCommand => _togglePin ??= new RelayCommand(() => IsPinned = !IsPinned);
+    private ICommand? _togglePin;
+
     public bool IsSmartMode
     {
         get => !_isCleanupMode;

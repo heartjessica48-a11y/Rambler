@@ -36,6 +36,30 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool GetWindowRect(nint hWnd, out RECT rect);
 
+    public const int GWL_EXSTYLE = -20;
+    public const long WS_EX_NOACTIVATE = 0x08000000;
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    private static extern nint GetWindowLongPtr64(nint hWnd, int index);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+    private static extern int GetWindowLong32(nint hWnd, int index);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    private static extern nint SetWindowLongPtr64(nint hWnd, int index, nint value);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongW")]
+    private static extern int SetWindowLong32(nint hWnd, int index, int value);
+
+    public static long GetWindowLong(nint hWnd, int index) =>
+        nint.Size == 8 ? GetWindowLongPtr64(hWnd, index) : GetWindowLong32(hWnd, index);
+
+    public static void SetWindowLong(nint hWnd, int index, long value)
+    {
+        if (nint.Size == 8) SetWindowLongPtr64(hWnd, index, (nint)value);
+        else SetWindowLong32(hWnd, index, (int)value);
+    }
+
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOZORDER = 0x0004;
     public const uint SWP_NOACTIVATE = 0x0010;

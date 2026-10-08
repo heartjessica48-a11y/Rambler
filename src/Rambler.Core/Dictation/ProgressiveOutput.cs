@@ -32,6 +32,13 @@ public sealed record ProgressiveOutputOptions
     /// <summary>How much committed text is sent to cleanup as read-only context.</summary>
     public int ContextChars { get; init; } = 1200;
     public Func<DateTime> Clock { get; init; } = () => DateTime.UtcNow;
+
+    /// <summary>
+    /// True: insert wherever the user is typing right now (re-captured before each insert).
+    /// False: insert only into the field captured when dictation started.
+    /// Either way, nothing is typed into Rambler's own windows or into non-editable targets.
+    /// </summary>
+    public bool FollowFocus { get; init; }
 }
 
 /// <summary>
@@ -51,6 +58,7 @@ public sealed class ProgressiveOutput : IAsyncDisposable
     private sealed record WorkItem(string Raw, bool Clean, bool IsFinal);
 
     private readonly InsertionTarget _target;
+    private InsertionTarget _currentTarget;
     private readonly ITextInserter _inserter;
     private readonly ICleanupService _cleanup;
     private readonly CleanupOptions _cleanupOptions;
@@ -81,6 +89,7 @@ public sealed class ProgressiveOutput : IAsyncDisposable
     {
         _mode = mode;
         _target = target;
+        _currentTarget = target;
         _inserter = inserter;
         _cleanup = cleanup;
         _cleanupOptions = cleanupOptions;
@@ -100,6 +109,9 @@ public sealed class ProgressiveOutput : IAsyncDisposable
     public OutputStatus Status { get { lock (_lock) return _status; } }
     public string? Problem { get { lock (_lock) return _problem; } }
     public bool HasPending { get { lock (_lock) return _pending.Length > 0; } }
+
+    /// <summary>Where text goes now: the starting field, or (follow-focus) the field last seen focused.</summary>
+    public InsertionTarget CurrentTarget { get { lock (_lock) return _currentTarget; } }
 
     /// <summary>The user switched modes mid-dictation; applies to text committed from now on.</summary>
     public void SetMode(DictationMode mode)
@@ -252,8 +264,9 @@ public sealed class ProgressiveOutput : IAsyncDisposable
         {
             ct.ThrowIfCancellationRequested();
 
+            var target = ResolveTarget();
             bool keep;
-            lock (_lock) keep = _halted || _pending.Length > 0 || !_target.CanReceiveText;
+            lock (_lock) keep = _halted || _pending.Length > 0 || (!_options.FollowFocus && !target.CanReceiveText);
             if (keep)
             {
                 lock (_lock) _pending.Append(remaining);
@@ -261,13 +274,13 @@ public sealed class ProgressiveOutput : IAsyncDisposable
                 return;
             }
 
-            if (!_inserter.IsTargetReady(_target))
+            if (!target.CanReceiveText || !_inserter.IsTargetReady(target))
             {
                 bool completing, refocus;
                 lock (_lock)
                 {
                     completing = _completing;
-                    refocus = _allowRefocus && !_refocusUsed;
+                    refocus = _allowRefocus && !_refocusUsed && target.CanReceiveText;
                     if (refocus) _refocusUsed = true;
                 }
 
@@ -281,7 +294,7 @@ public sealed class ProgressiveOutput : IAsyncDisposable
                 if (refocus)
                 {
                     SetStatus(OutputStatus.Inserting);
-                    var r = await _inserter.InsertAsync(_target, remaining, new InsertOptions(AllowRefocus: true, CopyOnFailure: false), ct)
+                    var r = await _inserter.InsertAsync(target, remaining, new InsertOptions(AllowRefocus: true, CopyOnFailure: false), ct)
                         .ConfigureAwait(false);
                     remaining = Apply(r, remaining, completing: true);
                     continue;
@@ -293,15 +306,34 @@ public sealed class ProgressiveOutput : IAsyncDisposable
             }
 
             SetStatus(OutputStatus.Inserting);
-            var result = await _inserter.InsertAsync(_target, remaining, InsertOptions.Progressive, ct).ConfigureAwait(false);
+            var result = await _inserter.InsertAsync(target, remaining, InsertOptions.Progressive, ct).ConfigureAwait(false);
             bool isCompleting;
             lock (_lock) isCompleting = _completing;
+            if (_options.FollowFocus && !isCompleting && result.Outcome == InsertionOutcome.Failed)
+            {
+                // This app can't take text (e.g. it runs as administrator). Wait for the user to move on
+                // instead of stopping insertion for the rest of the dictation.
+                SetStatus(OutputStatus.WaitingForTarget);
+                await _wake.WaitAsync(_options.TargetPollInterval, ct).ConfigureAwait(false);
+                continue;
+            }
             var before = remaining;
             remaining = Apply(result, remaining, isCompleting);
             if (remaining.Length > 0 && remaining == before && !isCompleting)
                 await _wake.WaitAsync(_options.TargetPollInterval, ct).ConfigureAwait(false); // not ready: don't spin
         }
         SetStatus(OutputStatus.Idle);
+    }
+
+    private InsertionTarget ResolveTarget()
+    {
+        if (!_options.FollowFocus) return _target;
+        var current = _inserter.CaptureTarget();
+        lock (_lock)
+        {
+            if (current.CanReceiveText) _currentTarget = current;
+        }
+        return current;
     }
 
     /// <summary>Records an insertion result; returns the text still to insert.</summary>

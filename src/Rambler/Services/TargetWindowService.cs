@@ -27,7 +27,20 @@ public sealed class TargetWindowService : IDisposable
 
     private static readonly HashSet<string> s_desktopClasses = new(StringComparer.Ordinal)
     {
-        "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
+        "Progman", "WorkerW",
+    };
+
+    /// <summary>
+    /// Windows shell surfaces that briefly take the foreground (clicking the tray icon activates the taskbar,
+    /// Start/search, Alt-Tab, flyouts). They're never "the app you were typing in", so they're skipped when
+    /// remembering the last app and when capturing a target.
+    /// </summary>
+    private static readonly HashSet<string> s_shellClasses = new(StringComparer.Ordinal)
+    {
+        "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "NotifyIconOverflowWindow", "TopLevelWindowForOverflowXamlIsland",
+        "Windows.UI.Core.CoreWindow", "XamlExplorerHostIslandWindow", "TaskListThumbnailWnd", "MultitaskingViewFrame",
+        "ForegroundStaging", "Shell_InputSwitchTopLevelWindow", "DV2ControlHost", "#32768", "tooltips_class32",
+        "Shell_Flyout", "ControlCenterWindow",
     };
 
     /// <summary>Classic editors where Enter inserts a line break (never "sends").</summary>
@@ -52,7 +65,8 @@ public sealed class TargetWindowService : IDisposable
     public TargetWindowService()
     {
         _foregroundProc = OnForegroundChanged; // keep the delegate alive
-        _lastExternalWindow = GetForegroundWindow();
+        var initial = GetForegroundWindow();
+        _lastExternalWindow = IsAppWindow(initial) ? Root(initial) : 0;
         _hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, 0, _foregroundProc, 0, 0,
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     }
@@ -66,7 +80,7 @@ public sealed class TargetWindowService : IDisposable
     public InsertionTarget Capture()
     {
         var hwnd = GetForegroundWindow();
-        if (hwnd == 0 || WindowPid(hwnd) == _ownPid) hwnd = _lastExternalWindow;
+        if (IsOwnOrShell(hwnd)) hwnd = _lastExternalWindow; // Rambler's popup, the taskbar, Start…
         if (hwnd == 0 || !IsWindow(hwnd)) return InsertionTarget.None;
 
         var root = Root(hwnd);
@@ -240,9 +254,15 @@ public sealed class TargetWindowService : IDisposable
         }
     }
 
+    private bool IsOwnOrShell(nint hwnd) =>
+        hwnd == 0 || WindowPid(hwnd) == _ownPid || s_shellClasses.Contains(ClassName(Root(hwnd)));
+
+    /// <summary>A real application window: not Rambler, not a shell surface, not the desktop.</summary>
+    private bool IsAppWindow(nint hwnd) => !IsOwnOrShell(hwnd) && !s_desktopClasses.Contains(ClassName(Root(hwnd)));
+
     private void OnForegroundChanged(nint hook, uint evt, nint hwnd, int idObject, int idChild, uint thread, uint time)
     {
-        if (hwnd != 0 && WindowPid(hwnd) != _ownPid) _lastExternalWindow = hwnd;
+        if (IsAppWindow(hwnd)) _lastExternalWindow = Root(hwnd);
         ForegroundChanged?.Invoke();
     }
 

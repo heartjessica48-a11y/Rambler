@@ -36,13 +36,20 @@ public sealed class AppSettings
     /// <summary>Smart Only bypass shortcut; empty (the default) disables it.</summary>
     public string HotkeySmartBypass { get; set; } = string.Empty;
     public ThemePreference Theme { get; set; } = ThemePreference.System;
-    public bool PlaySounds { get; set; }
+    public bool PlaySounds { get; set; } = true;
     public InsertionMethod InsertionMethod { get; set; } = InsertionMethod.Auto;
     /// <summary>
     /// False (default): progressive insertion, text appears as you speak. True: buffer the whole dictation
     /// and insert it at the end (best whole-session coherence).
     /// </summary>
     public bool InsertWhenFinished { get; set; }
+    /// <summary>
+    /// True (default): text goes wherever you're typing when it's ready, even if you switched apps.
+    /// False: only into the field that was focused when dictation started (insertion waits otherwise).
+    /// </summary>
+    public bool FollowFocus { get; set; } = true;
+    /// <summary>Keep the tray panel open as a small floating panel that never takes focus.</summary>
+    public bool PopupPinned { get; set; }
     public bool RestoreClipboard { get; set; } = true;
 
     // Audio
